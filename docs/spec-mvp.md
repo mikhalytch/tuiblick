@@ -33,7 +33,9 @@ tuiblick/
 Dependencies (current stable, no extras without reason):
 
 - `ratatui`, `crossterm`, `tokio` (process + time + fs), `serde` + `serde_yaml`,
-  `thiserror` (+ `anyhow` only in `main`), `dirs`, `chrono`.
+  `thiserror` (+ `anyhow` only in `main`), `dirs`, `chrono`,
+  `libc` (for `geteuid`), `zeroize` (sudo password in memory only),
+  `uuid` (v4 for `profiles.yaml` ids).
 - `nix` only if signal handling needs it; prefer `tokio::process::Child::kill`
   + `signal::kill` fallback. No `shlex` (argv arrays, no shell).
 
@@ -91,8 +93,12 @@ Rules:
 
 ## 4. AmneziaWG (`awg.rs`)
 
-- Up: `awg-quick up <iface>` (`<iface>` = stored stem).
-- Down: `awg-quick down <iface>`.
+- Up: `awg-quick up <full-stored-path>` (e.g.
+  `~/.config/tuiblick/awg/my-office.conf`). Full path is required:
+  bare `up <iface>` only searches `/etc/amnezia/...` and
+  `/usr/local/etc/...`. Interface name is derived from the file stem.
+- Down: `awg-quick down <full-stored-path>` (same path form; works
+  for both CONFIG_FILE and INTERFACE forms of `awg-quick`).
 - Both short-lived via `tokio::process::Command`, combined output
   captured, last output kept for the status pane, errors surfaced.
 - Status (only for the active AWG profile, every 3 s):
@@ -105,7 +111,10 @@ Rules:
 ## 5. OpenVPN (`openvpn.rs`)
 
 - Up: `openvpn --config <stored .ovpn> --verb 3` as long-lived
-  `tokio::process::Child`, stdout+stderr piped + merged.
+  `tokio::process::Child`, stdout+stderr piped + merged. Always
+  foreground: MVP never passes `--daemon` and warns (status bar +
+  log header) if the user's `.ovpn` contains a `daemon` directive,
+  since a daemonized child breaks log capture and SIGTERM shutdown.
 - Reader task pushes timestamped lines into
   `VecDeque<String>` capped at 2000 lines.
 - Down: SIGTERM, 3 s grace, then SIGKILL. Record exit code + time.
