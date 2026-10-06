@@ -18,7 +18,11 @@ Press `?` inside the app for the full key table. Everything below is the short v
 ## What it does
 
 - **Profile list** — import `.conf` / `.ovpn` files (`i`), even with spaces, parentheses, or unicode in the name. Files live under `~/.config/tuiblick/` (`awg/`, `openvpn/`, plus a `profiles.yaml` mapping). Rescan with `r`; entries whose file vanished show as `(missing)` instead of breaking.
-- **One tunnel at a time** — `Enter` connects, `d` disconnects. Connecting while another tunnel is up asks you to switch first. Quitting never kills your tunnel (it asks, then leaves it up — stopping is always explicit).
+- **One tunnel per backend** — one AWG and one OpenVPN tunnel may be up
+  together. `Enter` connects, `d` disconnects the selected profile's
+  tunnel. Connecting while the same backend is up asks you to switch
+  first. Quitting never kills your tunnels (it asks, then leaves them
+  up — stopping is always explicit).
 - **AmneziaWG status** — the right pane shows `awg show` output plus a summary: peer count, latest handshake, transfer rx/tx, refreshed every 3 s while connected.
 - **OpenVPN logs, live** — timestamped log view with follow toggle (`f`), scrolling (`j/k`, PgUp/PgDn), substring filter (`/`), view clear (`c`), and save to `/tmp` (`s`). If your `.ovpn` contains a `daemon` directive, tuiblick warns you and stays in the foreground so logs keep flowing.
 - **Exit-IP header** — always visible: `init <ip> (<gateway>/<iface>) → exit <ip>`, plus a per-tunnel last exit IP. Probes run in the background and never block the UI; when offline you get `unknown` / `n/a`, not a hang.
@@ -31,7 +35,7 @@ Press `?` inside the app for the full key table. Everything below is the short v
 | `j/k`, ↑↓ | move in list / scroll detail |
 | `Tab`, `1/2/3` | switch pane focus |
 | `Enter` / `c` | connect selected (`c` clears the log *view* when the OpenVPN pane is focused) |
-| `d` | disconnect active tunnel |
+| `d` | disconnect selected profile's tunnel |
 | `r` | rename selected profile (rescan is automatic) |
 | `i` / `D` | import file / delete profile (confirm) |
 | `/`, `f`, `s` | filter logs / follow toggle / save log to `/tmp` |

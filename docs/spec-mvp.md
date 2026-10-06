@@ -106,8 +106,8 @@ Rules:
   `awg show <iface>` (raw text shown) + best-effort parse of
   `latest handshake`, `transfer rx/tx`, peer count. Parse failures
   never fail the poll — raw text is the source of truth.
-- Only one active tunnel total in MVP (one AWG or one OpenVPN).
-  Connecting while another is active prompts `switch? y/N`.
+- At most one tunnel per backend in MVP (one AWG + one OpenVPN may be up
+  together). Connecting while the same backend is up prompts `switch? y/N`.
 
 ## 5. OpenVPN (`openvpn.rs`)
 
@@ -167,7 +167,7 @@ Keys (also listed under `?`):
 |-----------|-------------------------------------|
 | `j/k`,↑↓  | move in list / scroll logs          |
 | `Enter/c` | connect selected                    |
-| `d`       | disconnect active                   |
+| `d`       | disconnect selected profile's tunnel |
 | `r`       | rename selected profile (rescan is automatic) |
 | `i`       | import file (path prompt)           |
 | `D`       | delete profile (confirm)            |

@@ -104,10 +104,7 @@ fn render_profile_list(frame: &mut Frame, app: &App, area: Rect) {
         .iter()
         .enumerate()
         .map(|(index, profile)| {
-            let active = app
-                .active
-                .as_ref()
-                .is_some_and(|a| a.profile_id == profile.id);
+            let active = app.active.iter().any(|a| a.profile_id == profile.id);
             let marker = if active { "● " } else { "  " };
             let badge = match profile.vpn_type {
                 VpnType::Awg => "[awg]",
@@ -184,8 +181,8 @@ fn render_awg_detail(frame: &mut Frame, app: &App, area: Rect, focused: bool) {
     };
     let active_for_selected = app
         .active
-        .as_ref()
-        .filter(|a| a.profile_id == profile.id && a.kind == VpnType::Awg);
+        .iter()
+        .find(|a| a.profile_id == profile.id && a.kind == VpnType::Awg);
     let title = format!(" {} [awg] ", profile.display_name);
     let mut lines: Vec<Line> = vec![Line::from(format!("phase: {:?}", app.phase).to_lowercase())];
     match active_for_selected {
@@ -260,8 +257,8 @@ fn render_ovpn_detail(frame: &mut Frame, app: &App, area: Rect, focused: bool) {
     }
     let last_exit = app
         .active
-        .as_ref()
-        .filter(|a| a.profile_id == profile.id && a.kind == VpnType::OpenVpn)
+        .iter()
+        .find(|a| a.profile_id == profile.id && a.kind == VpnType::OpenVpn)
         .and_then(|a| a.last_exit_ip.clone())
         .unwrap_or_else(|| "—".to_owned());
     header.push(Line::from(format!("last exit: {last_exit}")));
@@ -311,10 +308,7 @@ fn render_log_view(frame: &mut Frame, app: &App, view: &[String], area: Rect) {
     }
     if view.is_empty() {
         let hint = if app.phase == ConnPhase::Connected
-            && app
-                .active
-                .as_ref()
-                .is_some_and(|a| a.kind == VpnType::OpenVpn)
+            && app.active.iter().any(|a| a.kind == VpnType::OpenVpn)
         {
             "waiting for openvpn output…"
         } else {
@@ -531,7 +525,7 @@ mod tests {
                 },
             ],
             selected: 0,
-            active: None,
+            active: Vec::new(),
             sudo: Arc::new(SudoRunner::new(false)),
             phase: ConnPhase::Idle,
             focus: Focus::List,
@@ -614,12 +608,12 @@ mod tests {
     #[test]
     fn popups_render_without_panic_at_80x24() {
         let mut app = fixture_app();
-        app.active = Some(ActiveConn {
+        app.active = vec![ActiveConn {
             profile_id: "a".to_owned(),
             kind: VpnType::Awg,
             started_at: "2026-10-06T12:00:00Z".to_owned(),
             last_exit_ip: Some("2.2.2.2".to_owned()),
-        });
+        }];
         let popups = vec![
             Popup::Help,
             Popup::Sudo,
@@ -665,12 +659,12 @@ mod tests {
         app.selected = 1;
         app.focus = Focus::Detail;
         app.phase = ConnPhase::Connected;
-        app.active = Some(ActiveConn {
+        app.active = vec![ActiveConn {
             profile_id: "b".to_owned(),
             kind: VpnType::OpenVpn,
             started_at: "2026-10-06T12:00:00Z".to_owned(),
             last_exit_ip: Some("9.9.9.9".to_owned()),
-        });
+        }];
         app.ovpn_daemon_warn = true;
         for i in 0..30 {
             app.ovpn_logs.push(format!("log line {i:02}"));

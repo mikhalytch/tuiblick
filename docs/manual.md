@@ -39,7 +39,7 @@ Press `?` in the app for the full table. Essentials:
 | `j/k`, ↑↓  | move in list / scroll detail                      |
 | `Tab, 1/2/3` | switch pane focus                               |
 | `Enter/c`  | connect selected (`c` clears the log *view* when the OpenVPN detail pane is focused) |
-| `d`        | disconnect active                                 |
+| `d`        | disconnect selected profile's tunnel            |
 | `r`        | rename selected profile (rescan is automatic)     |
 | `i`        | import file (path prompt, `Tab` toggles backend)  |
 | `D`        | delete profile (confirm)                          |
@@ -88,8 +88,9 @@ Press `?` in the app for the full table. Essentials:
 2. **Connect/disconnect each backend.** `Enter` on the AWG profile →
    `connected`, `awg show` text + handshake/transfer summary in the
    right pane, header `exit` IP updates. `d` → `disconnected`.
-   Repeat for OpenVPN → live timestamped logs. Connecting while
-   another tunnel is up prompts `switch? y/N`.
+   Repeat for OpenVPN → live timestamped logs; both tunnels may stay
+   up together (one per backend). Connecting while the same backend
+   is up prompts to switch (old tunnel stops first).
 3. **Sudo prompt appears once.** Fresh session, non-root, no cached
    password: first connect opens the masked prompt once. Type a
    **wrong** password → re-prompt with an error note (exactly one

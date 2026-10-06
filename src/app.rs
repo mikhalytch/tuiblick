@@ -4,7 +4,7 @@
 //!
 //! - `Profiles` = `phase == ConnPhase::Idle` with `popup == Popup::None`
 //! - `Connecting` / `Connected` / `Disconnecting` = [`ConnPhase`] directly
-//!   (`Connected` always carries `active: Some(..)`; `Idle` implies none)
+//!   (`Connected` always carries at least one [`ActiveConn`]; `Idle` implies none)
 //! - `ErrorPopup | HelpPopup | SudoPrompt | ImportPrompt | ConfirmPopup` =
 //!   [`Popup`] overlays on top of whatever `phase` is current
 //!
@@ -173,7 +173,9 @@ pub struct NetSnapshot {
 pub struct App {
     pub profiles: Vec<Profile>,
     pub selected: usize,
-    pub active: Option<ActiveConn>,
+    /// Live tunnels: at most one per backend, so one AWG and one OpenVPN
+    /// tunnel may be up together. `Connected` implies non-empty.
+    pub active: Vec<ActiveConn>,
     pub sudo: Arc<SudoRunner>,
     pub phase: ConnPhase,
     pub focus: Focus,
@@ -215,7 +217,7 @@ impl App {
         Ok(Self {
             profiles,
             selected: 0,
-            active: None,
+            active: Vec::new(),
             sudo: Arc::new(SudoRunner::new(is_root_process())),
             phase: ConnPhase::Idle,
             focus: Focus::List,
@@ -270,9 +272,14 @@ impl App {
         self.profiles.get(self.selected)
     }
 
-    pub fn active_profile(&self) -> Option<&Profile> {
-        let id = self.active.as_ref().map(|a| a.profile_id.as_str())?;
-        self.profiles.iter().find(|p| p.id == id)
+    /// Live tunnel of one backend, if any (at most one per backend).
+    pub fn active_of_kind(&self, kind: VpnType) -> Option<&ActiveConn> {
+        self.active.iter().find(|a| a.kind == kind)
+    }
+
+    /// True when the profile's own tunnel is up.
+    pub fn is_profile_active(&self, id: &str) -> bool {
+        self.active.iter().any(|a| a.profile_id == id)
     }
 
     /// Clamped list movement (no-op on an empty list).
@@ -301,21 +308,18 @@ impl App {
         self.detail_scroll = next as usize;
     }
 
-    /// Pure connect decision: switch-confirm when another tunnel is active,
-    /// sudo prompt when privilege is missing, immediate start otherwise.
+    /// Pure connect decision: switch-confirm when the same backend already
+    /// has a tunnel up, sudo prompt when privilege is missing, immediate
+    /// start otherwise (the other backend being up is fine).
     /// Never spawns: the caller executes the returned action.
     pub fn request_connect(&mut self, index: usize) -> ConnectAction {
         let Some(profile) = self.profiles.get(index) else {
             return ConnectAction::Ignored("no profile selected".to_owned());
         };
-        if self
-            .active
-            .as_ref()
-            .is_some_and(|a| a.profile_id == profile.id)
-        {
+        if self.is_profile_active(&profile.id) {
             return ConnectAction::Ignored("already connected to this profile".to_owned());
         }
-        if self.active.is_some() {
+        if self.active_of_kind(profile.vpn_type).is_some() {
             self.pending_connect = None;
             self.popup = Popup::Confirm(ConfirmKind::Switch { target: index });
             return ConnectAction::SwitchConfirm(index);
@@ -331,15 +335,15 @@ impl App {
         ConnectAction::StartNow(index)
     }
 
-    /// Pure quit decision: confirm when a tunnel is active (quit leaves it
+    /// Pure quit decision: confirm when any tunnel is up (quit leaves them
     /// up, spec §7), immediate quit otherwise.
     pub fn request_quit(&mut self) -> QuitAction {
-        if self.active.is_some() {
-            self.popup = Popup::Confirm(ConfirmKind::Quit);
-            QuitAction::ConfirmQuit
-        } else {
+        if self.active.is_empty() {
             self.should_quit = true;
             QuitAction::QuitNow
+        } else {
+            self.popup = Popup::Confirm(ConfirmKind::Quit);
+            QuitAction::ConfirmQuit
         }
     }
 
@@ -464,7 +468,7 @@ pub fn help_text() -> &'static str {
      j/k, ↑/↓      move in list / scroll detail\n\
      Tab, 1/2/3    switch pane focus (list / detail)\n\
      Enter, c       connect selected (c clears the OpenVPN log view when the detail pane is focused)\n\
-     d              disconnect active tunnel\n\
+     d              disconnect selected profile's tunnel\n\
      r              rename selected profile (config rescan is automatic)\n\
      i              import file (.ovpn/.conf flips backend, Tab toggles)\n\
      D              delete profile (confirm)\n\
@@ -670,12 +674,7 @@ fn handle_normal_key(app: &mut App, tx: &UnboundedSender<BackendMsg>, key: KeyEv
         KeyCode::Char('2') | KeyCode::Char('3') => app.focus = Focus::Detail,
         KeyCode::Enter => connect_selected(app, tx),
         KeyCode::Char('c') => {
-            if app.focus == Focus::Detail
-                && app
-                    .active
-                    .as_ref()
-                    .is_some_and(|a| a.kind == VpnType::OpenVpn)
-            {
+            if app.focus == Focus::Detail && app.active.iter().any(|a| a.kind == VpnType::OpenVpn) {
                 app.ovpn_logs.clear_view();
                 if let Some(session) = app.ovpn_session.as_ref() {
                     session.clear_view();
@@ -843,11 +842,17 @@ fn exec_confirm(app: &mut App, tx: &UnboundedSender<BackendMsg>, effect: Confirm
         ConfirmEffect::Quit | ConfirmEffect::Nothing => {}
         ConfirmEffect::DeleteProfile(id) => do_delete_profile(app, &id),
         ConfirmEffect::SwitchTo(target) => {
-            if app.active.is_some() && app.phase == ConnPhase::Connected {
-                // Switch = stop the old tunnel, then auto-connect the target
-                // when the down-task reports back.
+            let same_kind_up = app
+                .profiles
+                .get(target)
+                .is_some_and(|p| app.active_of_kind(p.vpn_type).is_some());
+            if same_kind_up && app.phase == ConnPhase::Connected {
+                // Switch = stop the old same-backend tunnel, then auto-connect
+                // the target when the down-task reports back. The other
+                // backend's tunnel (if any) is untouched.
                 app.auto_connect = Some(target);
-                do_disconnect(app, tx);
+                let kind = app.profiles[target].vpn_type;
+                do_disconnect_kind(app, tx, kind);
             } else {
                 let action = app.request_connect(target);
                 act_on_connect(app, tx, action);
@@ -884,12 +889,10 @@ fn start_connect(app: &mut App, tx: &UnboundedSender<BackendMsg>, target: usize)
     app.conn_gen = app.conn_gen.wrapping_add(1);
     let gen = app.conn_gen;
     app.phase = ConnPhase::Connecting;
-    app.ovpn_daemon_warn = false;
-    app.ovpn_auth_flagged = false;
-    app.awg_summary = None;
     set_status(app, format!("connecting to {}…", profile.display_name));
     match profile.vpn_type {
         VpnType::Awg => {
+            app.awg_summary = None;
             let task_tx = tx.clone();
             let sudo = Arc::clone(&app.sudo);
             let path = profile.stored_path();
@@ -904,6 +907,8 @@ fn start_connect(app: &mut App, tx: &UnboundedSender<BackendMsg>, target: usize)
             });
         }
         VpnType::OpenVpn => {
+            app.ovpn_daemon_warn = false;
+            app.ovpn_auth_flagged = false;
             let path = profile.stored_path();
             if OpenVpnSession::has_daemon_directive(&path) {
                 app.ovpn_daemon_warn = true;
@@ -934,13 +939,63 @@ fn start_connect(app: &mut App, tx: &UnboundedSender<BackendMsg>, target: usize)
     }
 }
 
+/// Recompute the global phase from the live tunnels. Transitional phases
+/// are set by their own operations; settling lands on `Connected` when
+/// anything is still up, `Idle` otherwise.
+fn settle_phase(app: &mut App) {
+    app.phase = if app.active.is_empty() {
+        ConnPhase::Idle
+    } else {
+        ConnPhase::Connected
+    };
+}
+
+/// `d` key: disconnect the *selected* profile's tunnel. A connect in flight
+/// can only be cancelled when the selected profile is its target; the other
+/// backend's tunnel is never touched.
 fn do_disconnect(app: &mut App, tx: &UnboundedSender<BackendMsg>) {
     match app.phase {
         ConnPhase::Connecting => {
-            // Nothing is up yet: invalidate the in-flight task; its late
-            // arrival is cleaned up in the message handler.
+            if app.pending_connect == Some(app.selected) {
+                // Cancel just this bring-up; its late arrival is cleaned up
+                // in the message handler. The other tunnel (if any) stays up.
+                app.conn_gen = app.conn_gen.wrapping_add(1);
+                settle_phase(app);
+                app.pending_connect = None;
+                app.auto_connect = None;
+                set_status(app, "connect cancelled");
+            } else {
+                set_status(app, "operation in progress…");
+            }
+        }
+        ConnPhase::Disconnecting => set_status(app, "already disconnecting…"),
+        ConnPhase::Idle => set_status(app, "no active tunnel"),
+        ConnPhase::Connected => {
+            let kind = app
+                .selected_profile()
+                .filter(|p| app.is_profile_active(&p.id))
+                .map(|p| p.vpn_type);
+            match kind {
+                Some(kind) => do_disconnect_kind(app, tx, kind),
+                None => set_status(app, "selected profile is not connected"),
+            }
+        }
+    }
+}
+
+/// Bring down the live tunnel of one backend (plus the switch chain behind
+/// it). Operations stay serialized: callers only get here when no other
+/// transitional operation is in flight.
+fn do_disconnect_kind(app: &mut App, tx: &UnboundedSender<BackendMsg>, kind: VpnType) {
+    let Some(active) = app.active.iter().find(|a| a.kind == kind).cloned() else {
+        settle_phase(app);
+        set_status(app, "no active tunnel");
+        return;
+    };
+    match app.phase {
+        ConnPhase::Connecting => {
             app.conn_gen = app.conn_gen.wrapping_add(1);
-            app.phase = ConnPhase::Idle;
+            settle_phase(app);
             app.pending_connect = None;
             app.auto_connect = None;
             set_status(app, "connect cancelled");
@@ -948,11 +1003,6 @@ fn do_disconnect(app: &mut App, tx: &UnboundedSender<BackendMsg>) {
         ConnPhase::Disconnecting => set_status(app, "already disconnecting…"),
         ConnPhase::Idle => set_status(app, "no active tunnel"),
         ConnPhase::Connected => {
-            let Some(active) = app.active.clone() else {
-                app.phase = ConnPhase::Idle;
-                set_status(app, "no active tunnel");
-                return;
-            };
             app.conn_gen = app.conn_gen.wrapping_add(1);
             let gen = app.conn_gen;
             app.phase = ConnPhase::Disconnecting;
@@ -962,7 +1012,7 @@ fn do_disconnect(app: &mut App, tx: &UnboundedSender<BackendMsg>) {
                 VpnType::Awg => {
                     let Some(profile) = app.profiles.iter().find(|p| p.id == active.profile_id)
                     else {
-                        app.phase = ConnPhase::Connected;
+                        settle_phase(app);
                         show_error(
                             app,
                             "profile entry gone — tunnel may still be up".to_owned(),
@@ -1000,7 +1050,7 @@ fn do_disconnect(app: &mut App, tx: &UnboundedSender<BackendMsg>) {
                         });
                     }
                     None => {
-                        app.phase = ConnPhase::Connected;
+                        settle_phase(app);
                         show_error(
                             app,
                             "openvpn session handle missing — tunnel may still be up".to_owned(),
@@ -1017,11 +1067,7 @@ fn open_delete_confirm(app: &mut App) {
         set_status(app, "no profile to delete");
         return;
     };
-    if app
-        .active
-        .as_ref()
-        .is_some_and(|a| a.profile_id == profile.id)
-    {
+    if app.active.iter().any(|a| a.profile_id == profile.id) {
         show_error(
             app,
             format!(
@@ -1048,7 +1094,7 @@ fn open_delete_confirm(app: &mut App) {
 }
 
 fn do_delete_profile(app: &mut App, id: &str) {
-    if app.active.as_ref().is_some_and(|a| a.profile_id == id) {
+    if app.active.iter().any(|a| a.profile_id == id) {
         show_error(
             app,
             "cannot delete the active tunnel's profile — disconnect (d) first".to_owned(),
@@ -1280,21 +1326,20 @@ fn handle_backend_msg(app: &mut App, tx: &UnboundedSender<BackendMsg>, msg: Back
             if gen != app.conn_gen {
                 return;
             }
-            let for_active = app
-                .active
-                .as_ref()
-                .is_some_and(|a| a.profile_id == profile_id);
+            let for_active = app.active.iter().any(|a| a.profile_id == profile_id);
             if !for_active {
                 return;
             }
             match result {
                 Ok(ip) => {
-                    if let Some(active) = app.active.as_mut() {
+                    if let Some(active) = app.active.iter_mut().find(|a| a.profile_id == profile_id)
+                    {
                         active.last_exit_ip = Some(ip);
                     }
                 }
                 Err(e) => {
-                    if let Some(active) = app.active.as_mut() {
+                    if let Some(active) = app.active.iter_mut().find(|a| a.profile_id == profile_id)
+                    {
                         active.last_exit_ip = Some("unknown".to_owned());
                     }
                     set_status(app, format!("exit-IP probe failed: {e}"));
@@ -1361,7 +1406,11 @@ fn complete_awg_up(
             app.phase = ConnPhase::Connected;
             app.pending_connect = None;
             app.sudo_reprompted = false;
-            app.active = Some(ActiveConn {
+            // One tunnel per backend: the switch flow always brings the old
+            // same-kind tunnel down first, but retain-then-push keeps the
+            // invariant even if two bring-ups ever raced.
+            app.active.retain(|a| a.kind != VpnType::Awg);
+            app.active.push(ActiveConn {
                 profile_id: profile_id.clone(),
                 kind: VpnType::Awg,
                 started_at: now_rfc3339(),
@@ -1374,14 +1423,14 @@ fn complete_awg_up(
             spawn_exit_ip(tx, gen, profile_id);
         }
         Err(AppError::SudoAuth) => {
-            app.phase = ConnPhase::Idle;
+            settle_phase(app);
             match app.sudo_auth_failed() {
                 SudoFailure::Reprompt => set_status(app, "sudo authentication failed — try again"),
                 SudoFailure::Fatal => set_status(app, "sudo authentication failed twice"),
             }
         }
         Err(e) => {
-            app.phase = ConnPhase::Idle;
+            settle_phase(app);
             app.pending_connect = None;
             show_error(app, format!("connect failed: {e}"));
         }
@@ -1407,8 +1456,8 @@ fn complete_awg_down(
     }
     match result {
         Ok(_) => {
-            app.phase = ConnPhase::Idle;
-            app.active = None;
+            app.active.retain(|a| a.kind != VpnType::Awg);
+            settle_phase(app);
             set_status(app, "disconnected");
             spawn_current_resample(tx, gen);
             if let Some(target) = app.auto_connect.take() {
@@ -1420,7 +1469,7 @@ fn complete_awg_down(
             // The down path cannot reuse the connect re-prompt slot, so it
             // surfaces directly; the tunnel stays marked up (honest).
             app.auto_connect = None;
-            app.phase = ConnPhase::Connected;
+            settle_phase(app);
             show_error(
                 app,
                 "sudo authentication failed during disconnect — tunnel may still be up".to_owned(),
@@ -1428,7 +1477,7 @@ fn complete_awg_down(
         }
         Err(e) => {
             app.auto_connect = None;
-            app.phase = ConnPhase::Connected;
+            settle_phase(app);
             show_error(
                 app,
                 format!("disconnect failed (tunnel may still be up): {e}"),
@@ -1441,7 +1490,7 @@ fn complete_awg_poll(app: &mut App, gen: u64, result: Result<String, AppError>) 
     app.awg_poll_inflight = false;
     let current = gen == app.conn_gen
         && app.phase == ConnPhase::Connected
-        && app.active.as_ref().is_some_and(|a| a.kind == VpnType::Awg);
+        && app.active.iter().any(|a| a.kind == VpnType::Awg);
     if !current {
         return;
     }
@@ -1490,7 +1539,8 @@ fn complete_ovpn_spawn(
             app.phase = ConnPhase::Connected;
             app.pending_connect = None;
             app.sudo_reprompted = false;
-            app.active = Some(ActiveConn {
+            app.active.retain(|a| a.kind != VpnType::OpenVpn);
+            app.active.push(ActiveConn {
                 profile_id: profile_id.clone(),
                 kind: VpnType::OpenVpn,
                 started_at: now_rfc3339(),
@@ -1512,14 +1562,14 @@ fn complete_ovpn_spawn(
         // `spawn_privileged` cannot return `SudoAuth` (auth failures surface
         // in the child's logs, see `sniff_ovpn_auth`); handled for uniformity.
         Err(AppError::SudoAuth) => {
-            app.phase = ConnPhase::Idle;
+            settle_phase(app);
             match app.sudo_auth_failed() {
                 SudoFailure::Reprompt => set_status(app, "sudo authentication failed — try again"),
                 SudoFailure::Fatal => set_status(app, "sudo authentication failed twice"),
             }
         }
         Err(e) => {
-            app.phase = ConnPhase::Idle;
+            settle_phase(app);
             app.pending_connect = None;
             show_error(app, format!("connect failed: {e}"));
         }
@@ -1545,8 +1595,8 @@ fn complete_ovpn_down(
         return;
     }
     app.ovpn_logs = logs;
-    app.phase = ConnPhase::Idle;
-    app.active = None;
+    app.active.retain(|a| a.kind != VpnType::OpenVpn);
+    settle_phase(app);
     let exit = exit_code
         .map(|c| c.to_string())
         .unwrap_or_else(|| "signal".to_owned());
@@ -1559,17 +1609,19 @@ fn complete_ovpn_down(
     }
 }
 
-/// 3 s AWG poll, and ONLY while the active tunnel is AWG (spec §4).
+/// 3 s AWG poll, and ONLY while an AWG tunnel is up (spec §4).
 /// Overlap is guarded by `awg_poll_inflight`.
 fn maybe_poll_awg(app: &mut App, tx: &UnboundedSender<BackendMsg>) {
     if app.phase != ConnPhase::Connected || app.awg_poll_inflight {
         return;
     }
-    let is_awg = app.active.as_ref().is_some_and(|a| a.kind == VpnType::Awg);
-    if !is_awg {
+    let Some(awg_id) = app
+        .active_of_kind(VpnType::Awg)
+        .map(|a| a.profile_id.clone())
+    else {
         return;
-    }
-    let Some(profile) = app.active_profile().cloned() else {
+    };
+    let Some(profile) = app.profiles.iter().find(|p| p.id == awg_id).cloned() else {
         return;
     };
     let iface = iface_of(&profile.stored_path());
@@ -1601,11 +1653,7 @@ fn sniff_ovpn_auth(app: &mut App) {
     if app.ovpn_auth_flagged || app.phase != ConnPhase::Connected {
         return;
     }
-    if !app
-        .active
-        .as_ref()
-        .is_some_and(|a| a.kind == VpnType::OpenVpn)
-    {
+    if !app.active.iter().any(|a| a.kind == VpnType::OpenVpn) {
         return;
     }
     let joined = app.ovpn_logs.raw_lines().join("\n");
@@ -1699,7 +1747,7 @@ mod tests {
         App {
             profiles: Vec::new(),
             selected: 0,
-            active: None,
+            active: Vec::new(),
             sudo: Arc::new(SudoRunner::new(is_root)),
             phase: ConnPhase::Idle,
             focus: Focus::List,
@@ -1754,28 +1802,83 @@ mod tests {
         app.profiles = vec![
             sample_profile("a", "office", VpnType::Awg),
             sample_profile("b", "tunnel", VpnType::OpenVpn),
+            sample_profile("c", "branch", VpnType::Awg),
         ];
         app.phase = ConnPhase::Connected;
-        app.active = Some(ActiveConn {
+        app.active = vec![ActiveConn {
             profile_id: "a".to_owned(),
             kind: VpnType::Awg,
             started_at: "2026-10-06T12:00:00Z".to_owned(),
             last_exit_ip: None,
-        });
+        }];
         app
     }
 
     #[test]
-    fn connect_while_active_requests_switch_confirm_without_spawning() {
+    fn connect_same_backend_requests_switch_confirm_without_spawning() {
         let mut app = connected_app();
-        let action = app.request_connect(1);
-        assert_eq!(action, ConnectAction::SwitchConfirm(1));
-        assert_eq!(app.popup, Popup::Confirm(ConfirmKind::Switch { target: 1 }));
+        let action = app.request_connect(2);
+        assert_eq!(action, ConnectAction::SwitchConfirm(2));
+        assert_eq!(app.popup, Popup::Confirm(ConfirmKind::Switch { target: 2 }));
         // Nothing spawned: no session, still connected to the old tunnel.
         assert!(app.ovpn_session.is_none());
         assert_eq!(app.phase, ConnPhase::Connected);
-        assert_eq!(app.active.as_ref().unwrap().profile_id, "a");
+        assert_eq!(app.active[0].profile_id, "a");
         assert_eq!(app.pending_connect, None);
+    }
+
+    #[test]
+    fn connect_other_backend_starts_without_confirm() {
+        // AWG is up; connecting the OpenVPN profile needs no switch confirm.
+        let mut app = connected_app();
+        let action = app.request_connect(1);
+        assert_eq!(action, ConnectAction::StartNow(1));
+        assert_eq!(app.popup, Popup::None);
+        assert_eq!(app.phase, ConnPhase::Connected);
+        assert_eq!(app.active.len(), 1);
+    }
+
+    #[test]
+    fn quit_with_two_tunnels_still_confirms() {
+        let mut app = connected_app();
+        app.active.push(ActiveConn {
+            profile_id: "b".to_owned(),
+            kind: VpnType::OpenVpn,
+            started_at: "2026-10-06T12:00:00Z".to_owned(),
+            last_exit_ip: None,
+        });
+        assert_eq!(app.request_quit(), QuitAction::ConfirmQuit);
+        assert_eq!(app.popup, Popup::Confirm(ConfirmKind::Quit));
+        assert!(!app.should_quit, "quit must wait for confirmation");
+    }
+
+    #[test]
+    fn disconnect_cancel_keeps_other_tunnel_connected() {
+        // AWG up + OpenVPN connecting; cancelling the OpenVPN bring-up via
+        // `d` on its (pending, selected) profile must leave AWG connected.
+        let mut app = connected_app();
+        app.selected = 1;
+        app.phase = ConnPhase::Connecting;
+        app.pending_connect = Some(1);
+        let (tx, _rx) = mpsc::unbounded_channel();
+        do_disconnect(&mut app, &tx);
+        assert_eq!(app.phase, ConnPhase::Connected);
+        assert_eq!(app.active.len(), 1);
+        assert_eq!(app.active[0].profile_id, "a");
+        assert_eq!(app.pending_connect, None);
+    }
+
+    #[test]
+    fn disconnect_other_profile_reports_in_progress() {
+        // Same setup, but `d` on a non-pending profile must not disturb it.
+        let mut app = connected_app();
+        app.selected = 0;
+        app.phase = ConnPhase::Connecting;
+        app.pending_connect = Some(1);
+        let (tx, _rx) = mpsc::unbounded_channel();
+        do_disconnect(&mut app, &tx);
+        assert_eq!(app.phase, ConnPhase::Connecting);
+        assert_eq!(app.pending_connect, Some(1));
     }
 
     #[test]
