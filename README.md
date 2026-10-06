@@ -33,6 +33,7 @@ Press `?` inside the app for the full key table. Everything below is the short v
 | Key | Action |
 |-----|--------|
 | `j/k`, ↑↓ | move in list / scroll detail |
+| `Ctrl+j/k` | move selected profile down/up (order persists) |
 | `Tab`, `1/2/3` | switch pane focus |
 | `Enter` / `c` | connect selected (`c` clears the log *view* when the OpenVPN pane is focused) |
 | `d` | disconnect selected profile's tunnel |

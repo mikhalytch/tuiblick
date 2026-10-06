@@ -372,6 +372,35 @@ pub fn delete_profile(id: &str) -> Result<(), AppError> {
     delete_profile_in(&config_root(), id)
 }
 
+fn move_profile_in(
+    root: &Path,
+    id: &str,
+    delta: isize,
+) -> Result<(Vec<Profile>, Option<usize>), AppError> {
+    let mut profiles = load_profiles_in(root)?;
+    let pos = profiles
+        .iter()
+        .position(|p| p.id == id)
+        .ok_or_else(|| AppError::Config(format!("profile not found: {id}")))?;
+    let len = profiles.len() as isize;
+    let new_pos = (pos as isize + delta).clamp(0, len - 1) as usize;
+    if new_pos == pos {
+        return Ok((profiles, None));
+    }
+    let profile = profiles.remove(pos);
+    profiles.insert(new_pos, profile);
+    save_profiles_in(root, &profiles)?;
+    Ok((profiles, Some(new_pos)))
+}
+
+/// Move a profile `delta` slots in the list order (negative = up).
+/// The order is the list order and is persisted to `profiles.yaml`;
+/// new imports always append at the end. Returns the reordered list and
+/// the profile's new index, or `None` when already at the edge.
+pub fn move_profile(id: &str, delta: isize) -> Result<(Vec<Profile>, Option<usize>), AppError> {
+    move_profile_in(&config_root(), id, delta)
+}
+
 fn rename_profile_in(root: &Path, id: &str, new_name: &str) -> Result<(), AppError> {
     let new_name = new_name.trim();
     if new_name.is_empty() {
@@ -644,6 +673,63 @@ mod tests {
         let err = rename_profile_in(&root, "nope", "x").expect_err("unknown id must fail");
         assert!(matches!(err, AppError::Config(_)));
         let err = rename_profile_in(&root, "nope", "   ").expect_err("blank name must fail");
+        assert!(matches!(err, AppError::Config(_)));
+        cleanup(&root);
+    }
+
+    fn seed_ordered(root: &Path) {
+        let mk = |id: &str, name: &str| Profile {
+            id: id.to_string(),
+            display_name: name.to_string(),
+            vpn_type: VpnType::Awg,
+            stored_file: format!("awg/{name}.conf"),
+            original_filename: format!("{name}.conf"),
+            created_at: now_rfc3339(),
+        };
+        save_profiles_in(root, &[mk("a", "one"), mk("b", "two"), mk("c", "three")]).expect("seed");
+    }
+
+    fn order_of(profiles: &[Profile]) -> Vec<&str> {
+        profiles.iter().map(|p| p.id.as_str()).collect()
+    }
+
+    #[test]
+    fn move_profile_reorders_and_persists() {
+        let root = test_root("move");
+        seed_ordered(&root);
+        let (profiles, moved) = move_profile_in(&root, "b", 1).expect("move down");
+        assert_eq!(moved, Some(2));
+        assert_eq!(order_of(&profiles), vec!["a", "c", "b"]);
+        // Persisted: reload shows the same order.
+        let back = load_profiles_in(&root).expect("reload");
+        assert_eq!(order_of(&back), vec!["a", "c", "b"]);
+        let (profiles, moved) = move_profile_in(&root, "b", -2).expect("move up");
+        assert_eq!(moved, Some(0));
+        assert_eq!(order_of(&profiles), vec!["b", "a", "c"]);
+        cleanup(&root);
+    }
+
+    #[test]
+    fn move_profile_edges_are_noop() {
+        let root = test_root("move-edge");
+        seed_ordered(&root);
+        let (profiles, moved) = move_profile_in(&root, "a", -1).expect("top up");
+        assert_eq!(moved, None);
+        assert_eq!(order_of(&profiles), vec!["a", "b", "c"]);
+        let (profiles, moved) = move_profile_in(&root, "c", 99).expect("bottom down");
+        assert_eq!(moved, None);
+        assert_eq!(order_of(&profiles), vec!["a", "b", "c"]);
+        // Untouched on disk too.
+        let back = load_profiles_in(&root).expect("reload");
+        assert_eq!(order_of(&back), vec!["a", "b", "c"]);
+        cleanup(&root);
+    }
+
+    #[test]
+    fn move_profile_unknown_id_errors() {
+        let root = test_root("move-err");
+        seed_ordered(&root);
+        let err = move_profile_in(&root, "nope", 1).expect_err("unknown id must fail");
         assert!(matches!(err, AppError::Config(_)));
         cleanup(&root);
     }

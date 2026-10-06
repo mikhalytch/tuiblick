@@ -298,7 +298,7 @@ impl App {
         self.selected = next as usize;
     }
 
-    /// Re-clamp after the list shrinks (rescan / delete).
+    /// Re-clamp after the list shrinks (auto-rescan / delete).
     pub fn clamp_selection(&mut self) {
         if self.profiles.is_empty() {
             self.selected = 0;
@@ -471,6 +471,7 @@ pub fn route_display(value: &Option<String>) -> &str {
 pub fn help_text() -> &'static str {
     "tuiblick — keys\n\
      j/k, ↑/↓      move in list / scroll detail\n\
+     Ctrl+j/k       move selected profile down/up (order persists)\n\
      Tab, 1/2/3    switch pane focus (list / detail)\n\
      Enter, c       connect selected (c clears the OpenVPN log view when the detail pane is focused)\n\
      d              disconnect selected profile's tunnel\n\
@@ -660,9 +661,23 @@ fn handle_key(app: &mut App, tx: &UnboundedSender<BackendMsg>, key: KeyEvent) {
 }
 
 /// Case-sensitive single-letter map (spec §7: `d` disconnects, `D` deletes).
-/// Ctrl/Alt chords (other than Ctrl-C, handled earlier) are ignored.
+/// Ctrl+j/k reorder the selected profile (verified against crossterm 0.28:
+/// they arrive as `Char('j'/'k')` + CONTROL, distinct from Enter/j/k).
+/// Other Ctrl/Alt chords (except Ctrl-C, handled earlier) are ignored.
 fn handle_normal_key(app: &mut App, tx: &UnboundedSender<BackendMsg>, key: KeyEvent) {
-    if key.modifiers.contains(KeyModifiers::CONTROL) || key.modifiers.contains(KeyModifiers::ALT) {
+    if key.modifiers.contains(KeyModifiers::CONTROL) {
+        match key.code {
+            KeyCode::Char('j') | KeyCode::Char('J') => {
+                move_selected_profile(app, 1);
+            }
+            KeyCode::Char('k') | KeyCode::Char('K') => {
+                move_selected_profile(app, -1);
+            }
+            _ => {}
+        }
+        return;
+    }
+    if key.modifiers.contains(KeyModifiers::ALT) {
         return;
     }
     match key.code {
@@ -1243,6 +1258,43 @@ fn submit_rename(app: &mut App) {
             set_status(app, format!("renamed to {new_name}"));
         }
         Err(e) => show_error(app, format!("rename failed: {e}")),
+    }
+}
+
+/// Ctrl+j/k: move the selected profile one slot down/up. The order is the
+/// list order and is persisted (`profiles.yaml`); selection follows the
+/// moved profile. Safe mid-connection: tunnels are referenced by id.
+fn move_selected_profile(app: &mut App, delta: isize) {
+    let Some(profile) = app.selected_profile().cloned() else {
+        set_status(app, "no profile to move");
+        return;
+    };
+    match config::move_profile(&profile.id, delta) {
+        Ok((profiles, moved)) => {
+            app.profiles = profiles;
+            match moved {
+                Some(index) => {
+                    app.selected = index;
+                    set_status(
+                        app,
+                        format!(
+                            "moved {} {}",
+                            profile.display_name,
+                            if delta > 0 { "down" } else { "up" }
+                        ),
+                    );
+                }
+                None => set_status(
+                    app,
+                    format!(
+                        "{} is already at the {}",
+                        profile.display_name,
+                        if delta > 0 { "bottom" } else { "top" }
+                    ),
+                ),
+            }
+        }
+        Err(e) => show_error(app, format!("reorder failed: {e}")),
     }
 }
 
@@ -2050,6 +2102,85 @@ mod tests {
     }
 
     #[test]
+    fn ctrl_j_k_reorders_selection_and_persists() {
+        // Redirect the config root for this test only (restored on drop,
+        // even on panic). Files are seeded so `is_missing()` answers are
+        // deterministic for any concurrent reader.
+        struct EnvRoot {
+            old: Option<String>,
+            dir: std::path::PathBuf,
+        }
+        impl EnvRoot {
+            fn set(tag: &str) -> Self {
+                let dir = std::env::temp_dir()
+                    .join(format!("tuiblick-move-app-{tag}-{}", std::process::id()));
+                let _ = std::fs::remove_dir_all(&dir);
+                std::fs::create_dir_all(dir.join("awg")).unwrap();
+                std::fs::create_dir_all(dir.join("openvpn")).unwrap();
+                std::fs::write(dir.join("awg/office.conf"), "x").unwrap();
+                std::fs::write(dir.join("openvpn/tunnel.ovpn"), "x").unwrap();
+                std::fs::write(dir.join("awg/branch.conf"), "x").unwrap();
+                let old = std::env::var("TUIBLICK_CONFIG_DIR").ok();
+                std::env::set_var("TUIBLICK_CONFIG_DIR", &dir);
+                Self { old, dir }
+            }
+        }
+        impl Drop for EnvRoot {
+            fn drop(&mut self) {
+                match &self.old {
+                    Some(v) => std::env::set_var("TUIBLICK_CONFIG_DIR", v),
+                    None => std::env::remove_var("TUIBLICK_CONFIG_DIR"),
+                }
+                let _ = std::fs::remove_dir_all(&self.dir);
+            }
+        }
+
+        let _guard = EnvRoot::set("keys");
+        let seed = vec![
+            sample_profile("a", "office", VpnType::Awg),
+            sample_profile("b", "tunnel", VpnType::OpenVpn),
+            sample_profile("c", "branch", VpnType::Awg),
+        ];
+        config::save_profiles(&seed).expect("seed profiles.yaml");
+
+        let ctrl = |c: char| KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL);
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let ids = |app: &App| {
+            app.profiles
+                .iter()
+                .map(|p| p.id.clone())
+                .collect::<Vec<_>>()
+        };
+
+        let mut app = App::new().expect("build");
+        assert_eq!(ids(&app), vec!["a", "b", "c"]);
+        assert_eq!(app.selected, 0);
+
+        // Ctrl+J moves "a" down; selection follows it.
+        handle_normal_key(&mut app, &tx, ctrl('j'));
+        assert_eq!(ids(&app), vec!["b", "a", "c"]);
+        assert_eq!(app.selected, 1);
+
+        // Ctrl+K moves it back up.
+        handle_normal_key(&mut app, &tx, ctrl('k'));
+        assert_eq!(ids(&app), vec!["a", "b", "c"]);
+        assert_eq!(app.selected, 0);
+
+        // Edge: already at the top — order untouched, status says so.
+        handle_normal_key(&mut app, &tx, ctrl('k'));
+        assert_eq!(ids(&app), vec!["a", "b", "c"]);
+        assert_eq!(app.selected, 0);
+        assert!(app.status_message.contains("already at the top"));
+
+        // Persisted: reload shows the same order.
+        let back = config::load_profiles().expect("reload");
+        assert_eq!(
+            back.iter().map(|p| p.id.clone()).collect::<Vec<_>>(),
+            vec!["a", "b", "c"]
+        );
+    }
+
+    #[test]
     fn sudo_prompt_condition_polarities() {
         assert!(empty_app(false).needs_sudo_prompt());
         let app = empty_app(false);
@@ -2239,6 +2370,7 @@ mod tests {
         let help = help_text();
         for token in [
             "Enter",
+            "Ctrl+j",
             "disconnect",
             "rescan",
             "rename",

@@ -50,7 +50,7 @@ Each source file lands as its own reviewable git commit.
   profiles.yaml
 ```
 
-`profiles.yaml` (list):
+`profiles.yaml` (list — **order is the list order**, new imports append at the end, `Ctrl+j/k` reorders):
 
 ```yaml
 - id: ulid-or-uuid-string
@@ -167,6 +167,7 @@ Keys (also listed under `?`):
 | Key       | Action                              |
 |-----------|-------------------------------------|
 | `j/k`,↑↓  | move in list / scroll logs          |
+| `Ctrl+j/k`| move selected profile down/up (order persists) |
 | `Enter/c` | connect selected                    |
 | `d`       | disconnect selected profile's tunnel |
 | `r`       | rename selected profile (rescan is automatic) |
