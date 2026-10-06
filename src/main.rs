@@ -1,4 +1,5 @@
 mod app;
+mod awg;
 mod config;
 mod errors;
 mod sudo;
