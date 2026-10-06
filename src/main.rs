@@ -2,6 +2,7 @@ mod app;
 mod awg;
 mod config;
 mod errors;
+mod net;
 mod openvpn;
 mod sudo;
 
