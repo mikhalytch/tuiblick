@@ -80,8 +80,8 @@ Press `?` in the app for the full table. Essentials:
    `.ovpn` whose names contain spaces, parentheses, and unicode
    (e.g. `My Office (1).conf`, `café vpn.ovpn`). Expect: copied
    under sanitized names, `original_filename` kept verbatim,
-   both listed. (`.ovpn` implies the openvpn backend; `.conf`
-   defers to the popup toggle.)
+   both listed. (`.ovpn` implies the openvpn backend, `.conf` implies
+   awg; files with any other extension defer to the popup toggle.)
 2. **Connect/disconnect each backend.** `Enter` on the AWG profile →
    `connected`, `awg show` text + handshake/transfer summary in the
    right pane, header `exit` IP updates. `d` → `disconnected`.

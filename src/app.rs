@@ -423,16 +423,17 @@ pub fn clean_import_path(raw: &str) -> Result<String, String> {
     }
 }
 
-/// `.ovpn` (any case) implies OpenVPN, everything else defers to the
-/// popup's toggled backend (`.conf` is ambiguous: both backends use it).
+/// `.ovpn` (any case) implies OpenVPN, `.conf` (any case) implies AWG —
+/// anything else defers to the popup's toggled backend.
 pub fn infer_import_vpn(path: &str, default: VpnType) -> VpnType {
-    let is_ovpn = Path::new(path)
+    let ext = Path::new(path)
         .extension()
-        .is_some_and(|ext| ext.eq_ignore_ascii_case("ovpn"));
-    if is_ovpn {
-        VpnType::OpenVpn
-    } else {
-        default
+        .map(|ext| ext.to_string_lossy().to_lowercase())
+        .unwrap_or_default();
+    match ext.as_str() {
+        "ovpn" => VpnType::OpenVpn,
+        "conf" => VpnType::Awg,
+        _ => default,
     }
 }
 
@@ -1917,13 +1918,20 @@ mod tests {
     fn import_vpn_inference() {
         assert_eq!(infer_import_vpn("tun.ovpn", VpnType::Awg), VpnType::OpenVpn);
         assert_eq!(infer_import_vpn("TUN.OVPN", VpnType::Awg), VpnType::OpenVpn);
-        // `.conf` is ambiguous: defer to the popup toggle.
+        // `.conf` implies AWG even when the toggle points at OpenVPN.
         assert_eq!(infer_import_vpn("a.conf", VpnType::Awg), VpnType::Awg);
+        assert_eq!(infer_import_vpn("a.conf", VpnType::OpenVpn), VpnType::Awg);
+        assert_eq!(infer_import_vpn("A.CONF", VpnType::OpenVpn), VpnType::Awg);
+        // No (or other) extension: defer to the popup toggle.
+        assert_eq!(infer_import_vpn("no-ext", VpnType::Awg), VpnType::Awg);
         assert_eq!(
-            infer_import_vpn("a.conf", VpnType::OpenVpn),
+            infer_import_vpn("no-ext", VpnType::OpenVpn),
             VpnType::OpenVpn
         );
-        assert_eq!(infer_import_vpn("no-ext", VpnType::Awg), VpnType::Awg);
+        assert_eq!(
+            infer_import_vpn("tun.txt", VpnType::OpenVpn),
+            VpnType::OpenVpn
+        );
     }
 
     #[test]
