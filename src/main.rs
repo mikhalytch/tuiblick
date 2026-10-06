@@ -5,6 +5,7 @@ mod errors;
 mod net;
 mod openvpn;
 mod sudo;
+mod ui;
 
 use crossterm::{
     execute,
