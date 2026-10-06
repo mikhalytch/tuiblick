@@ -605,7 +605,9 @@ enum BackendMsg {
 
 /// Event loop: owns `App`, drives backend tasks + `crate::ui::render`.
 /// The terminal (raw mode + alternate screen) is set up by `main`.
-pub async fn run() -> anyhow::Result<()> {
+/// `connect_all` runs the `C` batch once at startup (same flow as pressing
+/// `C`: skips busy/missing, stops on the first real failure).
+pub async fn run(connect_all: bool) -> anyhow::Result<()> {
     let mut app = App::new().map_err(anyhow::Error::from)?;
 
     let (etx, mut erx) = mpsc::unbounded_channel::<Event>();
@@ -635,6 +637,10 @@ pub async fn run() -> anyhow::Result<()> {
     awg_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut rescan_tick = tokio::time::interval(RESCAN_INTERVAL);
     rescan_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+    if connect_all {
+        start_connect_all(&mut app, &btx);
+    }
 
     loop {
         tokio::select! {

@@ -15,6 +15,18 @@ cargo build
 
 Press `?` inside the app for the full key table. Everything below is the short version.
 
+## CLI flags
+
+```sh
+tuiblick [OPTIONS]
+  -C, --connect-all   connect every profile in list order at startup
+                      (exactly as if you pressed C: skips busy/missing,
+                      stops on the first real failure)
+  -h, --help          print help and exit
+```
+
+Or via just: `just build` / `just install` (`~/.cargo/bin/tuiblick`).
+
 ## What it does
 
 - **Profile list** — import `.conf` / `.ovpn` files (`i`), even with spaces, parentheses, or unicode in the name. Files live under `~/.config/tuiblick/` (`awg/`, `openvpn/`, plus a `profiles.yaml` mapping). Rescan with `r`; entries whose file vanished show as `(missing)` instead of breaking.
