@@ -578,6 +578,7 @@ fn pane_block<'a>(title: &'a str, focused: bool) -> Block<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::VecDeque;
     use std::sync::Arc;
 
     use ratatui::backend::TestBackend;
@@ -631,6 +632,10 @@ mod tests {
             pending_connect: None,
             auto_connect: None,
             quit_after_disconnect: false,
+            batch_queue: VecDeque::new(),
+            batch_active: false,
+            batch_done: 0,
+            batch_skipped: 0,
             conn_gen: 0,
             import_input: String::new(),
             import_vpn: VpnType::Awg,

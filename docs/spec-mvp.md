@@ -171,6 +171,7 @@ Keys (also listed under `?`):
 | `j/k`,↑↓  | move in list / scroll logs          |
 | `Ctrl+j/k`| move selected profile down/up (order persists) |
 | `Enter/c` | connect selected                    |
+| `C`       | connect all in list order (skips busy/missing, stops on error) |
 | `d`       | disconnect selected profile's tunnel |
 | `r`       | rename selected profile (rescan is automatic) |
 | `i`       | import file (path prompt)           |

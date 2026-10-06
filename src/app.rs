@@ -38,6 +38,7 @@
 // The render-facing surface (`header_line`, `help_text`, `ovpn_view`,
 // `ActiveConn::started_at`, …) is consumed by `ui`.
 
+use std::collections::VecDeque;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
@@ -191,6 +192,15 @@ pub struct App {
     /// left, then quit. Set at `Q` start, cleared on quit or disconnect
     /// failure (which aborts the quit and surfaces the error).
     pub quit_after_disconnect: bool,
+    /// `C` flow (connect-all): remaining profile IDs in list order,
+    /// non-empty only while a batch is running.
+    pub batch_queue: VecDeque<String>,
+    /// `C` flow is in progress (queue runs down, or the last item's
+    /// bring-up is still in flight).
+    pub batch_active: bool,
+    /// `C` flow counters for the finish report.
+    pub batch_done: usize,
+    pub batch_skipped: usize,
     pub conn_gen: u64,
     pub import_input: String,
     pub import_vpn: VpnType,
@@ -240,6 +250,10 @@ impl App {
             pending_connect: None,
             auto_connect: None,
             quit_after_disconnect: false,
+            batch_queue: VecDeque::new(),
+            batch_active: false,
+            batch_done: 0,
+            batch_skipped: 0,
             conn_gen: 0,
             import_input: String::new(),
             import_vpn: VpnType::Awg,
@@ -399,6 +413,8 @@ impl App {
             self.pending_connect = None;
             self.sudo_input.clear();
             self.sudo_error = None;
+            // A batch cannot survive this: nothing will ever resume it.
+            batch_clear(self);
             self.popup =
                 Popup::Error("sudo authentication failed twice — tunnel not started".to_owned());
             SudoFailure::Fatal
@@ -513,6 +529,7 @@ pub fn help_text() -> &'static str {
      Ctrl+j/k       move selected profile down/up (order persists)\n\
      Tab, 1/2/3    switch pane focus (list / detail)\n\
      Enter, c       connect selected (c clears the OpenVPN log view when the detail pane is focused)\n\
+     C              connect all in list order (skips busy/missing, stops on error)\n\
      d              disconnect selected profile's tunnel\n\
      r              rename selected profile (config rescan is automatic)\n\
      i              import file (.ovpn/.conf flips backend, Tab toggles)\n\
@@ -749,6 +766,7 @@ fn handle_normal_key(app: &mut App, tx: &UnboundedSender<BackendMsg>, key: KeyEv
         }
         KeyCode::Char('d') => do_disconnect(app, tx),
         KeyCode::Char('D') => open_delete_confirm(app),
+        KeyCode::Char('C') => start_connect_all(app, tx),
         KeyCode::Char('r') => open_rename(app),
         KeyCode::Char('i') => open_import(app),
         KeyCode::Char('/') => {
@@ -791,7 +809,12 @@ fn handle_sudo_key(app: &mut App, tx: &UnboundedSender<BackendMsg>, key: KeyEven
             app.sudo_error = None;
             app.pending_connect = None;
             app.popup = Popup::None;
-            set_status(app, "sudo cancelled — connect aborted");
+            if app.batch_active {
+                batch_clear(app);
+                set_status(app, "connect-all cancelled");
+            } else {
+                set_status(app, "sudo cancelled — connect aborted");
+            }
         }
         KeyCode::Enter => submit_sudo(app, tx),
         KeyCode::Backspace => {
@@ -899,6 +922,147 @@ fn act_on_connect(app: &mut App, tx: &UnboundedSender<BackendMsg>, action: Conne
     }
 }
 
+/// `C`: connect every profile in list order, one at a time. Each item goes
+/// through the same decision as a manual `c` (sudo prompt when needed);
+/// same-backend-busy and missing-file items are skipped, any real failure
+/// stops the batch. Queue holds profile IDs (not indices) so a rescan,
+/// reorder, or delete mid-batch cannot misfire a connect.
+fn start_connect_all(app: &mut App, tx: &UnboundedSender<BackendMsg>) {
+    match app.phase {
+        ConnPhase::Connecting | ConnPhase::Disconnecting => {
+            set_status(app, "operation in progress…");
+            return;
+        }
+        ConnPhase::Idle | ConnPhase::Connected => {}
+    }
+    let queue = batch_queue_for(app);
+    if queue.is_empty() {
+        set_status(
+            app,
+            if app.profiles.is_empty() {
+                "no profiles to connect"
+            } else {
+                "everything already connected"
+            },
+        );
+        return;
+    }
+    let total = queue.len();
+    app.batch_queue = queue;
+    app.batch_active = true;
+    app.batch_done = 0;
+    app.batch_skipped = 0;
+    set_status(app, format!("connect-all: 0/{total}…"));
+    batch_next(app, tx);
+}
+
+/// Profiles still needing a tunnel, in list order. Pure (no spawning),
+/// so unit tests pin the skip-already-up rule directly.
+fn batch_queue_for(app: &App) -> VecDeque<String> {
+    app.profiles
+        .iter()
+        .filter(|p| !app.is_profile_active(&p.id))
+        .map(|p| p.id.clone())
+        .collect()
+}
+
+/// One batch step: pop items until one spawns/pauses the batch, or the
+/// queue runs dry (finish). Returns what the caller must do — only the
+/// `Spawn` arm touches backends, so tests cover every other path without
+/// spawning processes.
+fn batch_step(app: &mut App) -> BatchStep {
+    loop {
+        let Some(id) = app.batch_queue.front().cloned() else {
+            batch_finish(app);
+            return BatchStep::Done;
+        };
+        let Some(index) = app.profiles.iter().position(|p| p.id == id) else {
+            // Deleted mid-batch: drop silently, the list no longer has it.
+            app.batch_queue.pop_front();
+            continue;
+        };
+        let profile = &app.profiles[index];
+        if profile.is_missing() {
+            // `start_connect` would refuse without spawning (and stall the
+            // batch: popped item, no completion ever). Skip up front.
+            app.batch_queue.pop_front();
+            app.batch_skipped += 1;
+            continue;
+        }
+        match app.request_connect(index) {
+            ConnectAction::StartNow(target) => {
+                app.batch_queue.pop_front();
+                return BatchStep::Spawn(target);
+            }
+            ConnectAction::SudoPrompt(_) => {
+                // Popup is up; the batch pauses until submit/Esc/failure.
+                app.batch_queue.pop_front();
+                return BatchStep::Wait;
+            }
+            ConnectAction::SwitchConfirm(_) => {
+                // Same backend already up: never auto-switch in batch (that
+                // would tear down the tunnel just connected). Clear the
+                // popup `request_connect` raised and skip.
+                app.popup = Popup::None;
+                app.batch_queue.pop_front();
+                app.batch_skipped += 1;
+                continue;
+            }
+            ConnectAction::Ignored(_) => {
+                // Came up between queue build and now (manual connect
+                // during a sudo pause): already what the batch wants.
+                app.batch_queue.pop_front();
+                continue;
+            }
+        }
+    }
+}
+
+/// Outcome of [`batch_step`]: what the batch driver must do next.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BatchStep {
+    /// Bring up this profile index now (the only arm that spawns).
+    Spawn(usize),
+    /// Sudo prompt is up; completions/cancel/failure resume the batch.
+    Wait,
+    /// Queue drained; batch finished (status already set).
+    Done,
+}
+
+/// Drive the batch forward: one step, spawning at most one bring-up.
+/// Called at `C` start and from every successful connect completion.
+fn batch_next(app: &mut App, tx: &UnboundedSender<BackendMsg>) {
+    match batch_step(app) {
+        BatchStep::Spawn(target) => start_connect(app, tx, target),
+        BatchStep::Wait | BatchStep::Done => {}
+    }
+}
+
+/// Queue drained: report and stand down. Counts reset for the next run.
+fn batch_finish(app: &mut App) {
+    app.batch_active = false;
+    let (done, skipped) = (app.batch_done, app.batch_skipped);
+    app.batch_queue.clear();
+    app.batch_done = 0;
+    app.batch_skipped = 0;
+    set_status(
+        app,
+        if skipped == 0 {
+            format!("connect-all finished: {done} connected")
+        } else {
+            format!("connect-all finished: {done} connected, {skipped} skipped")
+        },
+    );
+}
+
+/// Stand the batch down silently (caller sets its own status/error).
+fn batch_clear(app: &mut App) {
+    app.batch_active = false;
+    app.batch_queue.clear();
+    app.batch_done = 0;
+    app.batch_skipped = 0;
+}
+
 fn exec_confirm(app: &mut App, tx: &UnboundedSender<BackendMsg>, effect: ConfirmEffect) {
     match effect {
         ConfirmEffect::Quit | ConfirmEffect::Nothing => {}
@@ -936,8 +1100,10 @@ fn do_quit(app: &mut App) {
 /// silently leaving a tunnel up.
 fn do_quit_all(app: &mut App, tx: &UnboundedSender<BackendMsg>) {
     // A switch in progress is abandoned: its target must not come up
-    // while everything is being brought down.
+    // while everything is being brought down. A connect-all batch is
+    // abandoned too: quitting supersedes it.
     app.auto_connect = None;
+    batch_clear(app);
     match app.phase {
         ConnPhase::Disconnecting => {
             // An op is already in flight; join the flow — its completion
@@ -1073,11 +1239,17 @@ fn do_disconnect(app: &mut App, tx: &UnboundedSender<BackendMsg>) {
             if app.pending_connect == Some(app.selected) {
                 // Cancel just this bring-up; its late arrival is cleaned up
                 // in the message handler. The other tunnel (if any) stays up.
+                // A batch cannot survive the cancel: nothing would resume it.
                 app.conn_gen = app.conn_gen.wrapping_add(1);
                 settle_phase(app);
                 app.pending_connect = None;
                 app.auto_connect = None;
-                set_status(app, "connect cancelled");
+                if app.batch_active {
+                    batch_clear(app);
+                    set_status(app, "connect-all cancelled");
+                } else {
+                    set_status(app, "connect cancelled");
+                }
             } else {
                 set_status(app, "operation in progress…");
             }
@@ -1572,6 +1744,10 @@ fn complete_awg_up(
             set_status(app, format!("connected: {name}"));
             spawn_current_resample(tx, gen);
             spawn_exit_ip(tx, gen, profile_id);
+            if app.batch_active {
+                app.batch_done += 1;
+                batch_next(app, tx);
+            }
         }
         Err(AppError::SudoAuth) => {
             settle_phase(app);
@@ -1583,7 +1759,13 @@ fn complete_awg_up(
         Err(e) => {
             settle_phase(app);
             app.pending_connect = None;
-            show_error(app, format!("connect failed: {e}"));
+            if app.batch_active {
+                let failed = profile_name(app, &profile_id);
+                batch_clear(app);
+                show_error(app, format!("connect-all stopped at {failed}: {e}"));
+            } else {
+                show_error(app, format!("connect failed: {e}"));
+            }
         }
     }
 }
@@ -1714,6 +1896,10 @@ fn complete_ovpn_spawn(
             }
             spawn_current_resample(tx, gen);
             spawn_exit_ip(tx, gen, profile_id);
+            if app.batch_active {
+                app.batch_done += 1;
+                batch_next(app, tx);
+            }
         }
         // `spawn_privileged` cannot return `SudoAuth` (auth failures surface
         // in the child's logs, see `sniff_ovpn_auth`); handled for uniformity.
@@ -1727,7 +1913,13 @@ fn complete_ovpn_spawn(
         Err(e) => {
             settle_phase(app);
             app.pending_connect = None;
-            show_error(app, format!("connect failed: {e}"));
+            if app.batch_active {
+                let failed = profile_name(app, &profile_id);
+                batch_clear(app);
+                show_error(app, format!("connect-all stopped at {failed}: {e}"));
+            } else {
+                show_error(app, format!("connect failed: {e}"));
+            }
         }
     }
 }
@@ -1904,6 +2096,10 @@ mod tests {
             pending_connect: None,
             auto_connect: None,
             quit_after_disconnect: false,
+            batch_queue: VecDeque::new(),
+            batch_active: false,
+            batch_done: 0,
+            batch_skipped: 0,
             conn_gen: 0,
             import_input: String::new(),
             import_vpn: VpnType::Awg,
@@ -2222,6 +2418,301 @@ mod tests {
         );
     }
 
+    /// Redirect the config root at a fresh temp dir for one test (restored
+    /// on drop, even on panic). Seed `files` (config-relative paths) so
+    /// `is_missing()` answers are deterministic for any concurrent reader.
+    struct TempConfig {
+        old: Option<String>,
+        dir: std::path::PathBuf,
+    }
+    impl TempConfig {
+        fn fresh(tag: &str, files: &[&str]) -> Self {
+            let dir =
+                std::env::temp_dir().join(format!("tuiblick-batch-{tag}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            for f in files {
+                let path = dir.join(f);
+                std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+                std::fs::write(&path, "fixture").unwrap();
+            }
+            let old = std::env::var("TUIBLICK_CONFIG_DIR").ok();
+            std::env::set_var("TUIBLICK_CONFIG_DIR", &dir);
+            Self { old, dir }
+        }
+    }
+    impl Drop for TempConfig {
+        fn drop(&mut self) {
+            match &self.old {
+                Some(v) => std::env::set_var("TUIBLICK_CONFIG_DIR", v),
+                None => std::env::remove_var("TUIBLICK_CONFIG_DIR"),
+            }
+            let _ = std::fs::remove_dir_all(&self.dir);
+        }
+    }
+
+    #[test]
+    fn batch_queue_skips_connected_profiles() {
+        let app = connected_app();
+        // "a" (awg) is up; queue holds the rest in list order.
+        let queue = batch_queue_for(&app);
+        assert_eq!(
+            queue.into_iter().collect::<Vec<_>>(),
+            vec!["b".to_owned(), "c".to_owned()]
+        );
+    }
+
+    #[test]
+    fn batch_step_drains_to_finish_report() {
+        let mut app = empty_app(true);
+        app.batch_active = true;
+        app.batch_queue = VecDeque::from(["x".to_owned()]);
+        app.batch_done = 2;
+        app.batch_skipped = 1;
+        // "x" vanished: dropped silently, then the queue is dry.
+        assert_eq!(batch_step(&mut app), BatchStep::Done);
+        assert!(!app.batch_active);
+        assert!(app.batch_queue.is_empty());
+        assert_eq!(
+            app.status_message,
+            "connect-all finished: 2 connected, 1 skipped"
+        );
+    }
+
+    #[test]
+    fn batch_finish_without_skips() {
+        let mut app = empty_app(true);
+        app.batch_active = true;
+        app.batch_done = 1;
+        batch_finish(&mut app);
+        assert!(!app.batch_active);
+        assert_eq!(app.status_message, "connect-all finished: 1 connected");
+    }
+
+    #[test]
+    fn batch_step_spawns_first_runnable() {
+        let _guard = TempConfig::fresh("spawn", &["awg/office.conf", "openvpn/tunnel.ovpn"]);
+        let mut app = empty_app(true);
+        app.profiles = vec![
+            sample_profile("a", "office", VpnType::Awg),
+            sample_profile("b", "tunnel", VpnType::OpenVpn),
+        ];
+        app.batch_active = true;
+        // "ghost" was deleted mid-batch: dropped, then "a" spawns (root, no
+        // sudo prompt). Nothing is spawned by the step itself.
+        app.batch_queue = VecDeque::from(["ghost".to_owned(), "a".to_owned()]);
+        assert_eq!(batch_step(&mut app), BatchStep::Spawn(0));
+        assert!(app.batch_queue.is_empty());
+        assert_eq!(app.batch_skipped, 0);
+    }
+
+    #[test]
+    fn batch_step_skips_busy_backend_without_popup() {
+        let _guard = TempConfig::fresh(
+            "busy",
+            &["awg/office.conf", "openvpn/tunnel.ovpn", "awg/branch.conf"],
+        );
+        // AWG "a" is up; "c" is same-backend: skip, never switch-confirm.
+        let mut app = connected_app();
+        app.batch_active = true;
+        app.batch_queue = VecDeque::from(["c".to_owned()]);
+        assert_eq!(batch_step(&mut app), BatchStep::Done);
+        assert_eq!(app.popup, Popup::None, "no stray switch popup");
+        assert_eq!(
+            app.status_message,
+            "connect-all finished: 0 connected, 1 skipped"
+        );
+    }
+
+    #[test]
+    fn batch_step_skips_missing_files_silently() {
+        // Nothing seeded: every stored file is missing. Skips must not raise
+        // error popups (the badges already say so); the finish counts them.
+        let _guard = TempConfig::fresh("missing", &[]);
+        let mut app = empty_app(true);
+        app.profiles = vec![
+            sample_profile("a", "office", VpnType::Awg),
+            sample_profile("b", "tunnel", VpnType::OpenVpn),
+        ];
+        app.batch_active = true;
+        app.batch_queue = VecDeque::from(["a".to_owned(), "b".to_owned()]);
+        assert_eq!(batch_step(&mut app), BatchStep::Done);
+        assert_eq!(app.popup, Popup::None, "no error popup for skips");
+        assert_eq!(
+            app.status_message,
+            "connect-all finished: 0 connected, 2 skipped"
+        );
+    }
+
+    #[test]
+    fn batch_step_pauses_on_sudo_prompt() {
+        let _guard = TempConfig::fresh("sudo", &["awg/office.conf", "openvpn/tunnel.ovpn"]);
+        let mut app = empty_app(false);
+        app.profiles = vec![
+            sample_profile("a", "office", VpnType::Awg),
+            sample_profile("b", "tunnel", VpnType::OpenVpn),
+        ];
+        app.batch_active = true;
+        app.batch_queue = VecDeque::from(["a".to_owned(), "b".to_owned()]);
+        assert_eq!(batch_step(&mut app), BatchStep::Wait);
+        assert_eq!(app.popup, Popup::Sudo);
+        assert_eq!(app.pending_connect, Some(0));
+        // Current item popped; the rest waits for submit/Esc/failure.
+        assert_eq!(
+            app.batch_queue.into_iter().collect::<Vec<_>>(),
+            vec!["b".to_owned()]
+        );
+    }
+
+    #[test]
+    fn sudo_esc_cancels_batch() {
+        let mut app = empty_app(false);
+        app.batch_active = true;
+        app.batch_queue = VecDeque::from(["b".to_owned()]);
+        app.batch_done = 1;
+        app.popup = Popup::Sudo;
+        app.pending_connect = Some(0);
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let esc = KeyEvent::new(KeyCode::Esc, KeyModifiers::empty());
+        app.popup = Popup::Sudo;
+        handle_sudo_key(&mut app, &tx, esc);
+        assert!(!app.batch_active);
+        assert!(app.batch_queue.is_empty());
+        assert_eq!(app.popup, Popup::None);
+        assert_eq!(app.status_message, "connect-all cancelled");
+    }
+
+    #[test]
+    fn fatal_sudo_failure_aborts_batch_but_reprompt_does_not() {
+        let mut app = empty_app(false);
+        app.batch_active = true;
+        app.batch_queue = VecDeque::from(["b".to_owned()]);
+        assert_eq!(app.sudo_auth_failed(), SudoFailure::Reprompt);
+        assert!(app.batch_active, "re-prompt must keep the batch alive");
+        assert_eq!(app.sudo_auth_failed(), SudoFailure::Fatal);
+        assert!(!app.batch_active);
+        assert!(app.batch_queue.is_empty());
+    }
+
+    #[test]
+    fn connect_failure_aborts_batch() {
+        let mut app = empty_app(true);
+        app.profiles = vec![sample_profile("a", "office", VpnType::Awg)];
+        app.phase = ConnPhase::Connecting;
+        app.batch_active = true;
+        app.batch_queue = VecDeque::from(["b".to_owned()]);
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let gen = app.conn_gen;
+        complete_awg_up(
+            &mut app,
+            &tx,
+            gen,
+            "a".to_owned(),
+            Err(AppError::User("boom".to_owned())),
+        );
+        assert!(!app.batch_active);
+        assert!(app.batch_queue.is_empty());
+        assert!(matches!(app.popup, Popup::Error(_)));
+        assert!(app.status_message.contains("connect-all stopped at office"));
+    }
+
+    #[test]
+    fn ovpn_spawn_failure_aborts_batch() {
+        let mut app = empty_app(true);
+        app.profiles = vec![sample_profile("b", "tunnel", VpnType::OpenVpn)];
+        app.phase = ConnPhase::Connecting;
+        app.batch_active = true;
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let gen = app.conn_gen;
+        complete_ovpn_spawn(
+            &mut app,
+            &tx,
+            gen,
+            "b".to_owned(),
+            Err(AppError::User("boom".to_owned())),
+        );
+        assert!(!app.batch_active);
+        assert!(matches!(app.popup, Popup::Error(_)));
+        assert!(app.status_message.contains("connect-all stopped at tunnel"));
+    }
+
+    #[test]
+    fn disconnect_cancel_aborts_batch() {
+        let mut app = empty_app(true);
+        app.profiles = vec![sample_profile("a", "office", VpnType::Awg)];
+        app.phase = ConnPhase::Connecting;
+        app.pending_connect = Some(0);
+        app.batch_active = true;
+        app.batch_queue = VecDeque::from(["b".to_owned()]);
+        let (tx, _rx) = mpsc::unbounded_channel();
+        do_disconnect(&mut app, &tx);
+        assert!(!app.batch_active);
+        assert!(app.batch_queue.is_empty());
+        assert_eq!(app.status_message, "connect-all cancelled");
+    }
+
+    #[test]
+    fn quit_all_idle_clears_batch() {
+        let mut app = empty_app(true);
+        app.batch_active = true;
+        app.batch_queue = VecDeque::from(["a".to_owned()]);
+        app.batch_done = 1;
+        let (tx, _rx) = mpsc::unbounded_channel();
+        do_quit_all(&mut app, &tx);
+        assert!(app.should_quit);
+        assert!(!app.batch_active);
+        assert!(app.batch_queue.is_empty());
+    }
+
+    #[test]
+    fn start_connect_all_refuses_transitional_phase() {
+        let mut app = empty_app(true);
+        app.profiles = vec![sample_profile("a", "office", VpnType::Awg)];
+        app.phase = ConnPhase::Connecting;
+        let (tx, _rx) = mpsc::unbounded_channel();
+        start_connect_all(&mut app, &tx);
+        assert!(!app.batch_active);
+        assert_eq!(app.status_message, "operation in progress…");
+    }
+
+    #[test]
+    fn start_connect_all_reports_all_up() {
+        let mut app = connected_app();
+        for (id, kind) in [("b", VpnType::OpenVpn), ("c", VpnType::Awg)] {
+            app.active.push(ActiveConn {
+                profile_id: id.to_owned(),
+                kind,
+                started_at: "2026-10-06T12:00:00Z".to_owned(),
+                last_exit_ip: None,
+            });
+        }
+        let (tx, _rx) = mpsc::unbounded_channel();
+        start_connect_all(&mut app, &tx);
+        assert!(!app.batch_active);
+        assert_eq!(app.status_message, "everything already connected");
+    }
+
+    #[test]
+    fn start_connect_all_skips_up_and_missing() {
+        // "a" and "b" are up; "c" is missing on disk (nothing seeded, so
+        // every stored file is missing): the batch starts, skips "c", and
+        // finishes without spawning anything.
+        let _guard = TempConfig::fresh("allup", &[]);
+        let mut app = connected_app();
+        app.active.push(ActiveConn {
+            profile_id: "b".to_owned(),
+            kind: VpnType::OpenVpn,
+            started_at: "2026-10-06T12:00:00Z".to_owned(),
+            last_exit_ip: None,
+        });
+        let (tx, _rx) = mpsc::unbounded_channel();
+        start_connect_all(&mut app, &tx);
+        assert!(!app.batch_active, "batch drains synchronously");
+        assert_eq!(
+            app.status_message,
+            "connect-all finished: 0 connected, 1 skipped"
+        );
+    }
+
     #[test]
     fn sudo_prompt_condition_polarities() {
         assert!(empty_app(false).needs_sudo_prompt());
@@ -2473,6 +2964,7 @@ mod tests {
         for token in [
             "Enter",
             "Ctrl+j",
+            "connect all",
             "disconnect",
             "rescan",
             "rename",

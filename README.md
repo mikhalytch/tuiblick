@@ -36,6 +36,7 @@ Press `?` inside the app for the full key table. Everything below is the short v
 | `Ctrl+j/k` | move selected profile down/up (order persists) |
 | `Tab`, `1/2/3` | switch pane focus |
 | `Enter` / `c` | connect selected (`c` clears the log *view* when the OpenVPN pane is focused) |
+| `C` | connect all in list order (skips busy/missing, stops on error) |
 | `d` | disconnect selected profile's tunnel |
 | `r` | rename selected profile (rescan is automatic) |
 | `i` / `D` | import file / delete profile (confirm) |

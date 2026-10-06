@@ -40,6 +40,7 @@ Press `?` in the app for the full table. Essentials:
 | `Ctrl+j/k` | move selected profile down/up (order persists)    |
 | `Tab, 1/2/3` | switch pane focus                               |
 | `Enter/c`  | connect selected (`c` clears the log *view* when the OpenVPN detail pane is focused) |
+| `C`        | connect all in list order (skips busy/missing, stops on error) |
 | `d`        | disconnect selected profile's tunnel            |
 | `r`        | rename selected profile (rescan is automatic)     |
 | `i`        | import file (path prompt, `Tab` toggles backend)  |
@@ -99,6 +100,8 @@ Press `?` in the app for the full table. Essentials:
    same backend is up prompts to switch (old tunnel stops first).
    `Q` brings everything down (newest tunnel first) and exits;
    a failed disconnect aborts the quit and shows the error.
+   `C` connects every profile in list order (same-backend-busy and
+   missing files are skipped, first real failure stops the batch).
 3. **Sudo prompt appears once.** Fresh session, non-root, no cached
    password: first connect opens the masked prompt once. Type a
    **wrong** password → re-prompt with an error note (exactly one
