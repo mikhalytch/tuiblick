@@ -17,7 +17,7 @@ use ratatui::{
 };
 
 use crate::app::{help_text, App, ConfirmKind, ConnPhase, Focus, Popup, QUIT_CONFIRM_MSG};
-use crate::config::VpnType;
+use crate::config::{Profile, VpnType};
 
 /// Mask glyph for the sudo password field (never render plaintext).
 const MASK_GLYPH: char = '•';
@@ -165,18 +165,40 @@ fn render_detail(frame: &mut Frame, app: &App, area: Rect) {
         return;
     };
     let focused = app.focus == Focus::Detail;
+    // Both backends live: stack the two panels vertically (AWG status over
+    // OpenVPN logs). The selected profile's panel gets the highlighted
+    // border; the other one stays dim.
+    let live_awg = live_profile(app, VpnType::Awg);
+    let live_ovpn = live_profile(app, VpnType::OpenVpn);
+    if let (Some(awg), Some(ovpn)) = (live_awg, live_ovpn) {
+        let sel_is_awg = app
+            .selected_profile()
+            .is_some_and(|p| p.vpn_type == VpnType::Awg);
+        let rows = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Percentage(40), Constraint::Percentage(60)])
+            .split(area);
+        render_awg_detail(frame, app, rows[0], sel_is_awg, awg);
+        render_ovpn_detail(frame, app, rows[1], !sel_is_awg, ovpn);
+        return;
+    }
     match profile.vpn_type {
-        VpnType::Awg => render_awg_detail(frame, app, area, focused),
-        VpnType::OpenVpn => render_ovpn_detail(frame, app, area, focused),
+        VpnType::Awg => render_awg_detail(frame, app, area, focused, profile),
+        VpnType::OpenVpn => render_ovpn_detail(frame, app, area, focused, profile),
     }
 }
 
+/// Live tunnel's profile for one backend, if that backend is up.
+fn live_profile(app: &App, kind: VpnType) -> Option<&Profile> {
+    let id = &app.active_of_kind(kind)?.profile_id;
+    app.profiles.iter().find(|p| &p.id == id)
+}
+
 /// AWG panel: phase/status text, parse summary, `last exit`, raw output.
-fn render_awg_detail(frame: &mut Frame, app: &App, area: Rect, focused: bool) {
+/// `profile` is the selected profile in single view, the live AWG tunnel's
+/// profile in split view; `focused` highlights the border.
+fn render_awg_detail(frame: &mut Frame, app: &App, area: Rect, focused: bool, profile: &Profile) {
     if area.width == 0 || area.height == 0 {
-        return;
-    }
-    let Some(profile) = app.selected_profile() else {
         return;
     };
     let active_for_selected = app
@@ -231,13 +253,12 @@ fn render_awg_detail(frame: &mut Frame, app: &App, area: Rect, focused: bool) {
 }
 
 /// OpenVPN panel: daemon-warn header, `last exit`, filterable log view.
-fn render_ovpn_detail(frame: &mut Frame, app: &App, area: Rect, focused: bool) {
+/// `profile` is the selected profile in single view, the live tunnel's
+/// profile in split view; `focused` highlights the border.
+fn render_ovpn_detail(frame: &mut Frame, app: &App, area: Rect, focused: bool, profile: &Profile) {
     if area.width == 0 || area.height == 0 {
         return;
     }
-    let Some(profile) = app.selected_profile() else {
-        return;
-    };
     let title = format!(" {} [openvpn] ", profile.display_name);
     let block = pane_block(&title, focused);
     let inner = block.inner(area);
@@ -493,7 +514,10 @@ mod tests {
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
 
+    use ratatui::style::Color;
+
     use crate::app::{ActiveConn, ConfirmKind, ConnPhase, Focus, NetSnapshot, Popup};
+    use crate::awg::AwgSummary;
     use crate::config::{Profile, VpnType};
     use crate::openvpn::LogRing;
     use crate::sudo::SudoRunner;
@@ -590,6 +614,26 @@ mod tests {
         buffer_text(&terminal)
     }
 
+    /// Sorted rows holding highlighted (focused-border) cells.
+    /// Only a focused pane border renders yellow in the main view.
+    fn yellow_rows(app: &App, width: u16, height: u16) -> Vec<u16> {
+        let backend = TestBackend::new(width, height);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+        terminal
+            .draw(|frame| render(frame, app))
+            .expect("render must not panic");
+        let buf = terminal.backend().buffer();
+        let mut rows: Vec<u16> = (0..buf.area.height)
+            .filter(|y| {
+                (0..buf.area.width)
+                    .any(|x| buf.cell((x, *y)).is_some_and(|c| c.fg == Color::Yellow))
+            })
+            .collect();
+        rows.sort_unstable();
+        rows.dedup();
+        rows
+    }
+
     #[test]
     fn header_line_method_contains_both_ips() {
         let app = fixture_app();
@@ -681,6 +725,70 @@ mod tests {
         app.detail_scroll = 0;
         let screen = render_text(&app, 80, 24);
         assert!(screen.contains("log line 00"), "scroll offset ignored");
+    }
+
+    #[test]
+    fn split_view_stacks_both_panels_with_selection_highlight() {
+        // Both backends live: AWG status over OpenVPN logs, and the selected
+        // profile's panel carries the highlighted border.
+        let mut app = fixture_app();
+        app.phase = ConnPhase::Connected;
+        // Detail focus: the list border goes dim, so yellow cells below can
+        // only come from the selected detail panel's highlighted border.
+        app.focus = Focus::Detail;
+        app.active = vec![
+            ActiveConn {
+                profile_id: "a".to_owned(),
+                kind: VpnType::Awg,
+                started_at: "2026-10-06T12:00:00Z".to_owned(),
+                last_exit_ip: Some("1.1.1.1".to_owned()),
+            },
+            ActiveConn {
+                profile_id: "b".to_owned(),
+                kind: VpnType::OpenVpn,
+                started_at: "2026-10-06T12:00:00Z".to_owned(),
+                last_exit_ip: Some("2.2.2.2".to_owned()),
+            },
+        ];
+        app.awg_status = "interface: awg0\nlatest handshake: just now".to_owned();
+        app.awg_summary = Some(AwgSummary {
+            peers: 1,
+            latest_handshake: Some("just now".to_owned()),
+            rx: Some("1 KiB".to_owned()),
+            tx: Some("2 KiB".to_owned()),
+        });
+        app.ovpn_logs.push("TLS handshake started".to_owned());
+
+        app.selected = 0;
+        let screen = render_text(&app, 80, 24);
+        assert!(screen.contains("peers:"), "awg panel missing in split");
+        assert!(
+            screen.contains("TLS handshake"),
+            "ovpn panel missing in split"
+        );
+        let awg_rows = yellow_rows(&app, 80, 24);
+        assert!(
+            !awg_rows.is_empty(),
+            "no highlighted panel with awg selected"
+        );
+
+        // Selecting the OpenVPN profile moves the highlight to the lower panel.
+        app.selected = 1;
+        let screen = render_text(&app, 80, 24);
+        assert!(screen.contains("peers:"), "awg panel missing in split");
+        assert!(
+            screen.contains("TLS handshake"),
+            "ovpn panel missing in split"
+        );
+        let ovpn_rows = yellow_rows(&app, 80, 24);
+        assert!(
+            !ovpn_rows.is_empty(),
+            "no highlighted panel with ovpn selected"
+        );
+        assert!(
+            awg_rows.iter().max() < ovpn_rows.iter().min(),
+            "highlight must follow selection: {awg_rows:?} vs {ovpn_rows:?}"
+        );
     }
 
     #[test]

@@ -89,8 +89,10 @@ Press `?` in the app for the full table. Essentials:
    `connected`, `awg show` text + handshake/transfer summary in the
    right pane, header `exit` IP updates. `d` → `disconnected`.
    Repeat for OpenVPN → live timestamped logs; both tunnels may stay
-   up together (one per backend). Connecting while the same backend
-   is up prompts to switch (old tunnel stops first).
+   up together (one per backend). With both up, the right side splits
+   vertically — AWG status over OpenVPN logs — and the selected
+   profile's panel gets the highlighted border. Connecting while the
+   same backend is up prompts to switch (old tunnel stops first).
 3. **Sudo prompt appears once.** Fresh session, non-root, no cached
    password: first connect opens the masked prompt once. Type a
    **wrong** password → re-prompt with an error note (exactly one
