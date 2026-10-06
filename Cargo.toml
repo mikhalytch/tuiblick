@@ -1,0 +1,18 @@
+[package]
+name = "tuiblick"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+ratatui = "0.29"
+crossterm = "0.28"
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+serde_yaml = "0.9"
+thiserror = "2"
+anyhow = "1"
+dirs = "6"
+chrono = "0.4"
+libc = "0.2"
+zeroize = "1"
+uuid = { version = "1", features = ["v4"] }
