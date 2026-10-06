@@ -240,23 +240,66 @@ fn render_awg_detail(frame: &mut Frame, app: &App, area: Rect, focused: bool, pr
         lines.push(Line::from(
             "Press Enter/c to connect. `awg show` output appears here.",
         ));
-    } else {
-        lines.push(Line::from(""));
-        for raw in app.awg_status.lines() {
-            lines.push(Line::from(raw.to_owned()));
+        let block = pane_block(&title, focused);
+        let inner = block.inner(area);
+        frame.render_widget(block, area);
+        if inner.width == 0 || inner.height == 0 {
+            return;
         }
+        let body = Paragraph::new(lines).wrap(Wrap { trim: false });
+        frame.render_widget(body, inner);
+        return;
     }
-    let block = pane_block(&title, focused);
+    // Two columns: status header + peer block(s) left, interface block right.
+    let (iface_lines, peer_lines) = crate::awg::split_sections(&app.awg_status);
+    if !peer_lines.is_empty() {
+        lines.push(Line::from(""));
+    }
+    let mut left = lines;
+    left.extend(peer_lines.into_iter().map(Line::from));
+    let right: Vec<Line> = iface_lines.into_iter().map(Line::from).collect();
+    let cols = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+        .split(area);
+    render_awg_column(frame, &left, cols[0], &title, focused, app.awg_scroll);
+    render_awg_column(
+        frame,
+        &right,
+        cols[1],
+        " interface ",
+        focused,
+        app.awg_scroll,
+    );
+}
+
+/// One AWG column: titled block + `awg_scroll`-sliced lines (the shared
+/// offset, clamped per column since sides differ in length).
+fn render_awg_column(
+    frame: &mut Frame,
+    lines: &[Line],
+    area: Rect,
+    title: &str,
+    focused: bool,
+    scroll: usize,
+) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+    let block = pane_block(title, focused);
     let inner = block.inner(area);
     frame.render_widget(block, area);
     if inner.width == 0 || inner.height == 0 {
         return;
     }
-    // Scrollable like the log view: `awg_scroll` is the top offset
-    // (j/k, PgUp/PgDn on this panel), clamped to the content.
-    let top = app.awg_scroll.min(lines.len().saturating_sub(1));
+    let top = scroll.min(lines.len().saturating_sub(1));
     let visible = inner.height as usize;
-    let shown: Vec<Line> = lines.into_iter().skip(top).take(visible.max(1)).collect();
+    let shown: Vec<Line> = lines
+        .iter()
+        .skip(top)
+        .take(visible.max(1))
+        .cloned()
+        .collect();
     let body = Paragraph::new(shown).wrap(Wrap { trim: false });
     frame.render_widget(body, inner);
 }
@@ -824,6 +867,21 @@ mod tests {
             "head must scroll away, got:\n{scrolled}"
         );
         assert!(scrolled.contains("status line 29"), "tail reachable");
+    }
+
+    #[test]
+    fn awg_panel_splits_interface_and_peer_columns() {
+        let mut app = fixture_app();
+        app.selected = 0;
+        app.focus = Focus::Detail;
+        app.awg_status = "interface: utun4\n  listening port: 62026\n  jc: 9\n\npeer: dM4ZrplmGMkCzwo9R5g8BBO3EMtaFzxHP2GOE7tYXR0=\n  endpoint: 216.173.69.190:443\n  transfer: 5.14 MiB received, 9.17 MiB sent\n"
+            .to_owned();
+        let screen = render_text(&app, 100, 24);
+        for token in ["utun4", "listening port", "peer:", "endpoint", "interface"] {
+            assert!(screen.contains(token), "{token:?} missing in split panel");
+        }
+        // Narrow panes must not panic either.
+        let _ = render_text(&app, 40, 12);
     }
 
     #[test]

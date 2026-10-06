@@ -157,6 +157,39 @@ fn transfer_values(line: &str) -> (Option<String>, Option<String>) {
     (rx, tx)
 }
 
+/// Split raw `awg show` text into interface lines and peer lines.
+///
+/// A line starting at column 0 opens a block: `peer:` (ASCII
+/// case-insensitive) starts the peer section, anything else top-level
+/// (notably `interface:`) stays in the interface section. Indented lines
+/// belong to the current block; blank lines are dropped (the two-column
+/// panel re-flows the text anyway). Unknown input yields short sections,
+/// never an error — the caller renders whatever comes back.
+pub fn split_sections(raw: &str) -> (Vec<String>, Vec<String>) {
+    let mut iface = Vec::new();
+    let mut peers = Vec::new();
+    let mut in_peers = false;
+    for line in raw.lines() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        if !line.starts_with(' ') && !line.starts_with('\t') {
+            let lower = line.to_ascii_lowercase();
+            if lower.starts_with("peer:") || lower.starts_with("peer ") {
+                in_peers = true;
+            } else if lower.starts_with("interface") {
+                in_peers = false;
+            }
+        }
+        if in_peers {
+            peers.push(line.to_owned());
+        } else {
+            iface.push(line.to_owned());
+        }
+    }
+    (iface, peers)
+}
+
 /// Byte-wise ASCII case-insensitive substring search. The returned index
 /// always starts at an ASCII byte (a non-ASCII byte can never equal an
 /// ASCII needle byte), so it is a valid `str` slicing boundary.
@@ -495,6 +528,70 @@ peer: dM4ZrplmGMkCzwo9R5g8BBO3EMtaFzxHP2GOE7tYXR0=
         );
         assert_eq!(s.rx.as_deref(), Some("5.14 MiB"));
         assert_eq!(s.tx.as_deref(), Some("9.17 MiB"));
+    }
+
+    #[test]
+    fn split_sections_separates_interface_and_peers() {
+        let (iface, peers) = split_sections(REALISTIC_SHOW);
+        assert!(iface.iter().any(|l| l.contains("interface: awg0")));
+        assert!(iface.iter().any(|l| l.contains("listening port")));
+        assert!(peers.iter().any(|l| l.starts_with("peer:")));
+        assert!(peers.iter().any(|l| l.contains("latest handshake")));
+        assert!(peers.iter().any(|l| l.contains("transfer:")));
+        assert!(
+            !iface.iter().any(|l| l.contains("transfer:")),
+            "transfer belongs to peers"
+        );
+        assert!(
+            !peers.iter().any(|l| l.contains("interface:")),
+            "interface stays out of peers"
+        );
+    }
+
+    #[test]
+    fn split_sections_handles_utun_dump_and_versions() {
+        // Live macOS shape: utun interface + Amnezia fields on the left,
+        // peer block on the right; re-cased headers still split.
+        let raw = "\
+interface: utun4
+  listening port: 62026
+  jc: 9
+  jmin: 50
+  h1: 1634537701
+
+peer: dM4ZrplmGMkCzwo9R5g8BBO3EMtaFzxHP2GOE7tYXR0=
+  endpoint: 216.173.69.190:443
+  transfer: 5.14 MiB received, 9.17 MiB sent
+";
+        let (iface, peers) = split_sections(raw);
+        assert_eq!(iface.len(), 5);
+        assert!(iface.iter().any(|l| l.contains("utun4")));
+        assert!(iface.iter().any(|l| l.contains("jc: 9")));
+        assert_eq!(peers.len(), 3);
+        assert!(peers[0].starts_with("peer:"));
+
+        let versioned = "\
+INTERFACE: awg7
+  Listening Port: 51821
+PEER: aaa=
+  Latest Handshake: 2 minutes ago
+";
+        let (iface, peers) = split_sections(versioned);
+        assert_eq!(iface.len(), 2);
+        assert_eq!(peers.len(), 2);
+
+        // Two peers share one peer column.
+        let two =
+            "interface: awg0\npeer: aaa=\n  endpoint: 1.1.1.1\npeer: bbb=\n  endpoint: 2.2.2.2\n";
+        let (iface, peers) = split_sections(two);
+        assert_eq!(iface, vec!["interface: awg0".to_owned()]);
+        assert_eq!(peers.len(), 4);
+
+        // Empty in, empty out; blanks dropped.
+        let (iface, peers) = split_sections("");
+        assert!(iface.is_empty() && peers.is_empty());
+        let (iface, peers) = split_sections("\n  \n");
+        assert!(iface.is_empty() && peers.is_empty());
     }
 
     #[test]

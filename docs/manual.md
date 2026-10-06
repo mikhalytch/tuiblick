@@ -88,8 +88,9 @@ Press `?` in the app for the full table. Essentials:
    `.ovpn`/`.conf` flips the backend switch as you type; Tab overrides
    it — whatever the switch shows at Enter wins.)
 2. **Connect/disconnect each backend.** `Enter` on the AWG profile →
-   `connected`, `awg show` text + handshake/transfer summary in the
-   right pane, header `exit` IP updates. `d` → `disconnected`.
+   `connected`: the right pane splits in two — status + peer block
+   left, interface block right — header `exit` IP updates.
+   `d` → `disconnected`.
    Repeat for OpenVPN → live timestamped logs; both tunnels may stay
    up together (one per backend). With both up, the right side splits
    vertically — AWG status over OpenVPN logs — and the selected
