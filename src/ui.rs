@@ -207,17 +207,8 @@ fn render_awg_detail(frame: &mut Frame, app: &App, area: Rect, focused: bool, pr
         .find(|a| a.profile_id == profile.id && a.kind == VpnType::Awg);
     let title = format!(" {} [awg] ", profile.display_name);
     let mut lines: Vec<Line> = vec![Line::from(format!("phase: {:?}", app.phase).to_lowercase())];
-    match active_for_selected {
-        Some(active) => {
-            lines.push(Line::from(format!("started: {}", active.started_at)));
-            lines.push(Line::from(format!(
-                "last exit: {}",
-                active.last_exit_ip.as_deref().unwrap_or("—")
-            )));
-        }
-        None => {
-            lines.push(Line::from("last exit: — (not connected)"));
-        }
+    if let Some(active) = active_for_selected {
+        lines.push(Line::from(format!("started: {}", active.started_at)));
     }
     if let Some(summary) = app
         .awg_summary
@@ -250,50 +241,57 @@ fn render_awg_detail(frame: &mut Frame, app: &App, area: Rect, focused: bool, pr
         frame.render_widget(body, inner);
         return;
     }
-    // Two columns: status header + peer block(s) left, interface block right.
+    // One outer block (title carries exit/follow/scroll), two borderless
+    // columns inside: status header + peer block(s) left, interface right.
+    let exit = active_for_selected
+        .as_ref()
+        .and_then(|a| a.last_exit_ip.clone())
+        .unwrap_or_else(|| "—".to_owned());
+    let mut full_title = format!(
+        "{title} · exit {exit} · follow {}",
+        if app.awg_follow { "on" } else { "off" }
+    );
+    if !app.awg_follow && app.awg_scroll > 0 {
+        full_title.push_str(&format!(" · ↓{}", app.awg_scroll));
+    }
+    let titled = fit_title(&full_title, area.width.saturating_sub(2) as usize);
+    let block = pane_block(&titled, focused);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    if inner.width == 0 || inner.height == 0 {
+        return;
+    }
     let (iface_lines, peer_lines) = crate::awg::split_sections(&app.awg_status);
     if !peer_lines.is_empty() {
         lines.push(Line::from(""));
     }
     let mut left = lines;
     left.extend(peer_lines.into_iter().map(Line::from));
-    let right: Vec<Line> = iface_lines.into_iter().map(Line::from).collect();
+    let mut right = vec![Line::styled(
+        "interface",
+        Style::default().fg(Color::DarkGray),
+    )];
+    right.extend(iface_lines.into_iter().map(Line::from));
     let cols = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
-        .split(area);
-    render_awg_column(frame, &left, cols[0], &title, focused, app.awg_scroll);
-    render_awg_column(
-        frame,
-        &right,
-        cols[1],
-        " interface ",
-        focused,
-        app.awg_scroll,
-    );
+        .split(inner);
+    render_column_lines(frame, &left, cols[0], app.awg_follow, app.awg_scroll);
+    render_column_lines(frame, &right, cols[1], app.awg_follow, app.awg_scroll);
 }
 
-/// One AWG column: titled block + `awg_scroll`-sliced lines (the shared
-/// offset, clamped per column since sides differ in length).
-fn render_awg_column(
-    frame: &mut Frame,
-    lines: &[Line],
-    area: Rect,
-    title: &str,
-    focused: bool,
-    scroll: usize,
-) {
+/// Borderless column of lines with follow/scroll slicing (mirrors the log
+/// view: follow pins the tail, otherwise `scroll` is the top offset).
+fn render_column_lines(frame: &mut Frame, lines: &[Line], area: Rect, follow: bool, scroll: usize) {
     if area.width == 0 || area.height == 0 {
         return;
     }
-    let block = pane_block(title, focused);
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
-    if inner.width == 0 || inner.height == 0 {
-        return;
-    }
-    let top = scroll.min(lines.len().saturating_sub(1));
-    let visible = inner.height as usize;
+    let visible = area.height as usize;
+    let top = if follow {
+        lines.len().saturating_sub(visible)
+    } else {
+        scroll.min(lines.len().saturating_sub(1))
+    };
     let shown: Vec<Line> = lines
         .iter()
         .skip(top)
@@ -301,7 +299,21 @@ fn render_awg_column(
         .cloned()
         .collect();
     let body = Paragraph::new(shown).wrap(Wrap { trim: false });
-    frame.render_widget(body, inner);
+    frame.render_widget(body, area);
+}
+
+/// Truncate a panel title to the inner width (identity first, so
+/// truncation drops the trailing meta, never the name). No-op when it fits.
+fn fit_title(full: &str, inner_width: usize) -> String {
+    if inner_width == 0 {
+        return String::new();
+    }
+    if full.chars().count() <= inner_width {
+        return full.to_owned();
+    }
+    let mut s: String = full.chars().take(inner_width.saturating_sub(1)).collect();
+    s.push('…');
+    s
 }
 
 /// OpenVPN panel: daemon-warn header, `last exit`, filterable log view.
@@ -311,7 +323,23 @@ fn render_ovpn_detail(frame: &mut Frame, app: &App, area: Rect, focused: bool, p
     if area.width == 0 || area.height == 0 {
         return;
     }
-    let title = format!(" {} [openvpn] ", profile.display_name);
+    let last_exit = app
+        .active
+        .iter()
+        .find(|a| a.profile_id == profile.id && a.kind == VpnType::OpenVpn)
+        .and_then(|a| a.last_exit_ip.clone())
+        .unwrap_or_else(|| "—".to_owned());
+    // Exit/follow/scroll live in the panel title, not the output: only the
+    // daemon warning and the line counts take content rows here.
+    let mut full_title = format!(
+        " {} [openvpn] · exit {last_exit} · follow {}",
+        profile.display_name,
+        if app.log_follow { "on" } else { "off" }
+    );
+    if !app.log_follow && app.detail_scroll > 0 {
+        full_title.push_str(&format!(" · ↓{}", app.detail_scroll));
+    }
+    let title = fit_title(&full_title, area.width.saturating_sub(2) as usize);
     let block = pane_block(&title, focused);
     let inner = block.inner(area);
     frame.render_widget(block, area);
@@ -328,13 +356,6 @@ fn render_ovpn_detail(frame: &mut Frame, app: &App, area: Rect, focused: bool, p
                 .add_modifier(Modifier::BOLD),
         ));
     }
-    let last_exit = app
-        .active
-        .iter()
-        .find(|a| a.profile_id == profile.id && a.kind == VpnType::OpenVpn)
-        .and_then(|a| a.last_exit_ip.clone())
-        .unwrap_or_else(|| "—".to_owned());
-    header.push(Line::from(format!("last exit: {last_exit}")));
     let view = app.ovpn_view();
     let total = view.len();
     let shown = if app.log_filter.is_empty() {
@@ -342,11 +363,7 @@ fn render_ovpn_detail(frame: &mut Frame, app: &App, area: Rect, focused: bool, p
     } else {
         format!("{total} shown (filter: {})", app.log_filter)
     };
-    header.push(Line::from(format!(
-        "follow: {}  scroll: {}  {shown}",
-        if app.log_follow { "on(f)" } else { "off(f)" },
-        app.detail_scroll,
-    )));
+    header.push(Line::from(shown));
 
     let filter_rows: u16 = if app.filter_editing { 1 } else { 0 };
     let rows = Layout::default()
@@ -624,6 +641,7 @@ mod tests {
             log_follow: true,
             detail_scroll: 0,
             awg_scroll: 0,
+            awg_follow: true,
             awg_status: String::new(),
             awg_summary: None,
             awg_poll_inflight: false,
@@ -854,12 +872,16 @@ mod tests {
             .map(|i| format!("status line {i:02}"))
             .collect::<Vec<_>>()
             .join("\n");
-        let full = render_text(&app, 80, 24);
+        // Follow pins the tail regardless of a stale zero offset.
+        let followed = render_text(&app, 80, 24);
         assert!(
-            full.contains("status line 00"),
-            "head visible without scroll"
+            !followed.contains("status line 00"),
+            "tail pinned under follow"
         );
+        assert!(followed.contains("status line 29"), "tail reachable");
 
+        // Unpinned, the offset moves the view.
+        app.awg_follow = false;
         app.awg_scroll = 20;
         let scrolled = render_text(&app, 80, 24);
         assert!(
@@ -867,6 +889,33 @@ mod tests {
             "head must scroll away, got:\n{scrolled}"
         );
         assert!(scrolled.contains("status line 29"), "tail reachable");
+    }
+
+    #[test]
+    fn panel_titles_carry_exit_follow_scroll() {
+        let mut app = fixture_app();
+        app.selected = 1;
+        app.phase = ConnPhase::Connected;
+        app.active = vec![ActiveConn {
+            profile_id: "b".to_owned(),
+            kind: VpnType::OpenVpn,
+            started_at: "2026-10-06T12:00:00Z".to_owned(),
+            last_exit_ip: Some("9.9.9.9".to_owned()),
+        }];
+        app.log_follow = false;
+        app.detail_scroll = 7;
+        let screen = render_text(&app, 100, 24);
+        assert!(screen.contains("9.9.9.9"), "exit ip in title");
+        assert!(screen.contains("follow off"), "follow state in title");
+        assert!(screen.contains("↓7"), "scroll offset in title");
+        assert!(
+            !screen.contains("last exit:"),
+            "exit must leave the content rows"
+        );
+
+        // Narrow columns truncate the meta, never the identity.
+        let narrow = render_text(&app, 40, 12);
+        assert!(narrow.contains("tunnel"), "name survives truncation");
     }
 
     #[test]

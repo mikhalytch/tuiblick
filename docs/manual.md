@@ -89,7 +89,8 @@ Press `?` in the app for the full table. Essentials:
    it — whatever the switch shows at Enter wins.)
 2. **Connect/disconnect each backend.** `Enter` on the AWG profile →
    `connected`: the right pane splits in two — status + peer block
-   left, interface block right — header `exit` IP updates.
+   left, interface block right — exit IP, follow, and scroll offset
+   live in the panel titles, header `exit` IP updates.
    `d` → `disconnected`.
    Repeat for OpenVPN → live timestamped logs; both tunnels may stay
    up together (one per backend). With both up, the right side splits

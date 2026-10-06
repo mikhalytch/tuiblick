@@ -203,6 +203,9 @@ pub struct App {
     /// Scroll offset of the AWG status panel (per-panel: the OpenVPN log
     /// view uses `detail_scroll` + `log_follow` instead).
     pub awg_scroll: usize,
+    /// Tail-pin of the AWG status panel, mirroring `log_follow` for the log
+    /// view (`f` toggles whichever panel is selected).
+    pub awg_follow: bool,
     pub awg_status: String,
     pub awg_summary: Option<AwgSummary>,
     pub awg_poll_inflight: bool,
@@ -247,6 +250,7 @@ impl App {
             log_follow: true,
             detail_scroll: 0,
             awg_scroll: 0,
+            awg_follow: true,
             awg_status: String::new(),
             awg_summary: None,
             awg_poll_inflight: false,
@@ -317,10 +321,8 @@ impl App {
     /// (standard pager behavior — otherwise the keys visibly do nothing
     /// while follow pins the tail).
     pub fn scroll_detail(&mut self, delta: isize) {
-        let is_awg = self
-            .selected_profile()
-            .is_some_and(|p| p.vpn_type == VpnType::Awg);
-        if is_awg {
+        if self.is_awg_selected() {
+            self.awg_follow = false;
             let next = (self.awg_scroll as isize + delta).max(0);
             self.awg_scroll = next as usize;
         } else {
@@ -410,7 +412,27 @@ impl App {
     }
 
     pub fn toggle_follow(&mut self) {
-        self.log_follow = !self.log_follow;
+        if self.is_awg_selected() {
+            self.awg_follow = !self.awg_follow;
+        } else {
+            self.log_follow = !self.log_follow;
+        }
+    }
+
+    /// Follow state of the selected panel (for the `f` status message).
+    /// Returns the panel label plus the state: `("awg", true)`, `("log", …)`.
+    pub fn follow_state(&self) -> (&'static str, bool) {
+        if self.is_awg_selected() {
+            ("awg", self.awg_follow)
+        } else {
+            ("log", self.log_follow)
+        }
+    }
+
+    /// True when the selected profile belongs to the AWG backend.
+    fn is_awg_selected(&self) -> bool {
+        self.selected_profile()
+            .is_some_and(|p| p.vpn_type == VpnType::Awg)
     }
 
     pub fn apply_filter(&mut self) {
@@ -496,7 +518,7 @@ pub fn help_text() -> &'static str {
      i              import file (.ovpn/.conf flips backend, Tab toggles)\n\
      D              delete profile (confirm)\n\
      /              filter openvpn logs\n\
-     f              follow toggle\n\
+     f              follow toggle (selected panel)\n\
      s              save openvpn log to /tmp\n\
      PgUp/PgDn      scroll detail (leaves log-follow)\n\
      ?              this help\n\
@@ -735,12 +757,13 @@ fn handle_normal_key(app: &mut App, tx: &UnboundedSender<BackendMsg>, key: KeyEv
         }
         KeyCode::Char('f') => {
             app.toggle_follow();
+            let (panel, on) = app.follow_state();
             set_status(
                 app,
-                if app.log_follow {
-                    "log follow on"
+                if on {
+                    format!("{panel} follow on")
                 } else {
-                    "log follow off"
+                    format!("{panel} follow off")
                 },
             );
         }
@@ -1891,6 +1914,7 @@ mod tests {
             log_follow: true,
             detail_scroll: 0,
             awg_scroll: 0,
+            awg_follow: true,
             awg_status: String::new(),
             awg_summary: None,
             awg_poll_inflight: false,
@@ -2386,10 +2410,31 @@ mod tests {
         app.profiles = vec![sample_profile("a", "office", VpnType::Awg)];
         app.scroll_detail(5);
         assert_eq!(app.awg_scroll, 5);
+        assert!(!app.awg_follow, "scroll must drop awg follow too");
         assert_eq!(app.detail_scroll, 0, "log offset untouched");
-        assert!(app.log_follow, "follow untouched on the awg panel");
+        assert!(app.log_follow, "log follow untouched on the awg panel");
         app.scroll_detail(-9);
         assert_eq!(app.awg_scroll, 0);
+    }
+
+    #[test]
+    fn follow_toggle_targets_selected_panel() {
+        let mut app = empty_app(true);
+        app.profiles = vec![
+            sample_profile("a", "office", VpnType::Awg),
+            sample_profile("b", "tunnel", VpnType::OpenVpn),
+        ];
+        // AWG selected: `f` flips the panel pin, not the log.
+        app.selected = 0;
+        app.toggle_follow();
+        assert!(!app.awg_follow);
+        assert!(app.log_follow);
+        assert_eq!(app.follow_state(), ("awg", false));
+        // OpenVPN selected: `f` flips the log.
+        app.selected = 1;
+        app.toggle_follow();
+        assert!(!app.log_follow);
+        assert_eq!(app.follow_state(), ("log", false));
     }
 
     #[test]

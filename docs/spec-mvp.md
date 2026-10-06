@@ -153,8 +153,10 @@ How (macOS, no heavy deps):
 UI placement:
 
 - Header bar: `init <initial-ip> (<gateway>/<if>) → exit <current-ip>`.
-- AWG status panel: `last exit: <ip|—>` + handshake/transfer.
-- OpenVPN panel header: `last exit: <ip|—>` above the log view.
+- AWG status panel title: `last exit: <ip|—>` + follow/scroll state; body
+  keeps handshake/transfer + the two columns.
+- OpenVPN panel title: `last exit: <ip|—>` + follow/scroll state, above
+  the log view (daemon warning + line counts stay content rows).
 
 ## 7. TUI (`app.rs` + `ui.rs`)
 
@@ -174,7 +176,7 @@ Keys (also listed under `?`):
 | `i`       | import file (path prompt)           |
 | `D`       | delete profile (confirm)            |
 | `/`       | filter logs (openvpn)               |
-| `f`       | toggle log follow                   |
+| `f`       | toggle follow (selected panel)      |
 | `s`       | save openvpn log to /tmp            |
 | `?`       | help popup                          |
 | `q`,Ctrl-C| disconnect? no — just quit (confirm if any tunnel is up) |
