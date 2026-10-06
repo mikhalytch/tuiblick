@@ -12,10 +12,6 @@
 //!   are wrapped in `tokio::time::timeout`, so no probe ever blocks input
 //!   rendering: the UI shows `resolving…` meanwhile (Task 7/8).
 
-// Task 6: first consumer is Task 7 (`app`); allow dead code until then,
-// mirroring `awg.rs` / `openvpn.rs` / `sudo.rs` / `config.rs`.
-#![allow(dead_code)]
-
 use std::time::Duration;
 
 use crate::errors::AppError;

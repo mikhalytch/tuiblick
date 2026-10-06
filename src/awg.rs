@@ -15,10 +15,6 @@
 //!   with `cmd` in backend form (`awg-quick up <path>`, never the
 //!   `sudo -S ...` wrapper) and the last 2 KB of combined output.
 
-// Task 4: first consumer is Task 7 (`app`); allow dead code until then,
-// mirroring `sudo.rs` / `config.rs`.
-#![allow(dead_code)]
-
 use std::path::Path;
 use std::process::Output;
 

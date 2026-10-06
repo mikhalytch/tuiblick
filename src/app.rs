@@ -36,9 +36,7 @@
 //! showing the last logs until the next explicit `d`. Flagged for Task 9.
 
 // The render-facing surface (`header_line`, `help_text`, `ovpn_view`,
-// `ActiveConn::started_at`, …) is consumed by Task 8 (`ui`); allow dead code
-// until then, mirroring Tasks 2–6. Task 9 removes this.
-#![allow(dead_code)]
+// `ActiveConn::started_at`, …) is consumed by `ui`.
 
 use std::path::Path;
 use std::sync::Arc;
@@ -65,8 +63,8 @@ const EVENT_POLL_TIMEOUT: Duration = Duration::from_millis(200);
 /// Detail-pane scroll steps for `j/k` vs PgUp/PgDn.
 const SCROLL_STEP: isize = 1;
 const PAGE_STEP: isize = 10;
-/// Quit confirmation (spec §7, verbatim).
-const QUIT_CONFIRM_MSG: &str = "active tunnel will stay up after quit. Quit anyway? y/N";
+/// Quit confirmation (spec §7, verbatim). Shared with `ui` rendering.
+pub(crate) const QUIT_CONFIRM_MSG: &str = "active tunnel will stay up after quit. Quit anyway? y/N";
 
 /// Active tunnel runtime state (never persisted to disk, spec §6).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1424,7 +1422,8 @@ fn complete_ovpn_down(
     exit_code: Option<i32>,
     ended_at: Option<String>,
 ) {
-    app.ovpn_logs = logs;
+    // Stale/cleanup arrivals must not clobber the live log view: only the
+    // current generation's logs replace the cache.
     if cleanup {
         set_status(app, "late openvpn spawn stopped");
         return;
@@ -1432,6 +1431,7 @@ fn complete_ovpn_down(
     if gen != app.conn_gen {
         return;
     }
+    app.ovpn_logs = logs;
     app.phase = ConnPhase::Idle;
     app.active = None;
     let exit = exit_code

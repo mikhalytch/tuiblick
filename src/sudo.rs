@@ -21,10 +21,6 @@
 //! prompts, it runs once at startup, and async callers can wrap it in
 //! `spawn_blocking` if ever needed.
 
-// Task 3: the first consumer is Task 4 (`awg`); allow dead code until then,
-// mirroring `config.rs` / `errors.rs`.
-#![allow(dead_code)]
-
 use std::process::Output;
 use std::sync::Mutex;
 

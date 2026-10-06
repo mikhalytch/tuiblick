@@ -10,10 +10,6 @@
 //! `tempfile` dev-dependency). `TUIBLICK_CONFIG_DIR` overrides the root,
 //! reserved for future integration tests — never set in production.
 
-// Task 2: the public wrappers below are first consumed by later tasks
-// (`app` wiring in Task 7); allow dead code until then, mirroring `errors.rs`.
-#![allow(dead_code)]
-
 use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -106,6 +102,9 @@ fn config_root() -> PathBuf {
 }
 
 /// Absolute config directory (`~/.config/tuiblick` on macOS).
+/// Spec Task 2 interface; the app entry points use `scan_and_reconcile` /
+/// `import_file` / `delete_profile`, so this stays for API completeness.
+#[allow(dead_code)]
 pub fn tuiblick_dir() -> PathBuf {
     config_root()
 }
@@ -160,6 +159,8 @@ fn load_profiles_in(root: &Path) -> Result<Vec<Profile>, AppError> {
 }
 
 /// Load the profile mapping; a missing `profiles.yaml` means empty, not error.
+/// Spec Task 2 interface; live code paths go through `scan_and_reconcile`.
+#[allow(dead_code)]
 pub fn load_profiles() -> Result<Vec<Profile>, AppError> {
     load_profiles_in(&config_root())
 }
@@ -173,6 +174,8 @@ fn save_profiles_in(root: &Path, profiles: &[Profile]) -> Result<(), AppError> {
 }
 
 /// Persist the profile mapping (creates the config dir if needed).
+/// Spec Task 2 interface; live code paths go through `scan_and_reconcile`.
+#[allow(dead_code)]
 pub fn save_profiles(profiles: &[Profile]) -> Result<(), AppError> {
     save_profiles_in(&config_root(), profiles)
 }

@@ -18,10 +18,6 @@
 //!   on a sudo prompt. Auth failures after spawn surface as sudo error lines
 //!   in the captured stderr log, not as spawn errors.
 
-// Task 5: first consumer is Task 7 (`app`); allow dead code until then,
-// mirroring `sudo.rs` / `awg.rs`.
-#![allow(dead_code)]
-
 use std::collections::VecDeque;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
@@ -107,11 +103,15 @@ impl LogRing {
     }
 
     /// True when the view holds no lines.
+    /// (Only exercised by unit tests; the UI checks the filtered `Vec`.)
+    #[allow(dead_code)]
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
 
     /// Number of lines in the backing buffer (ignores the view watermark).
+    /// (Only exercised by unit tests; `s`-save goes through `raw_lines`.)
+    #[allow(dead_code)]
     pub fn backing_len(&self) -> usize {
         self.buf.len()
     }
@@ -138,6 +138,9 @@ pub struct OpenVpnSession {
     child: tokio::process::Child,
     logs: Arc<Mutex<LogRing>>,
     readers: Vec<tokio::task::JoinHandle<()>>,
+    // Diagnostic only (which command the session supervises); exit reporting
+    // uses `exit_code` / `ended_at`.
+    #[allow(dead_code)]
     cmd: String,
     stopped: bool,
     exit_code: Option<i32>,
@@ -270,6 +273,7 @@ impl OpenVpnSession {
     /// Test-only helper: supervise an arbitrary command with the same core
     /// (stdout+stderr piped, merged timestamped readers). Tests must NEVER
     /// invoke real `openvpn`; typically `sleep`.
+    #[cfg(test)]
     pub(crate) fn spawn_command_for_test(program: &str, args: &[&str]) -> Result<Self, AppError> {
         let argv: Vec<String> = args.iter().map(|s| (*s).to_owned()).collect();
         let cmd = crate::sudo::display_cmd(program, &argv);

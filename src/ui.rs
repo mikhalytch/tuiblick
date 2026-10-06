@@ -16,14 +16,8 @@ use ratatui::{
     Frame,
 };
 
-use crate::app::{help_text, App, ConfirmKind, ConnPhase, Focus, Popup};
+use crate::app::{help_text, App, ConfirmKind, ConnPhase, Focus, Popup, QUIT_CONFIRM_MSG};
 use crate::config::VpnType;
-
-/// Quit confirmation, spec §7 verbatim.
-///
-/// NOTE: `QUIT_CONFIRM_MSG` in `app.rs` is private, so the string is
-/// duplicated here for rendering. Task 9 owns the dedupe decision.
-const QUIT_CONFIRM_MSG: &str = "active tunnel will stay up after quit. Quit anyway? y/N";
 
 /// Mask glyph for the sudo password field (never render plaintext).
 const MASK_GLYPH: char = '•';
@@ -182,6 +176,9 @@ fn render_detail(frame: &mut Frame, app: &App, area: Rect) {
 
 /// AWG panel: phase/status text, parse summary, `last exit`, raw output.
 fn render_awg_detail(frame: &mut Frame, app: &App, area: Rect, focused: bool) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
     let Some(profile) = app.selected_profile() else {
         return;
     };
@@ -238,6 +235,9 @@ fn render_awg_detail(frame: &mut Frame, app: &App, area: Rect, focused: bool) {
 
 /// OpenVPN panel: daemon-warn header, `last exit`, filterable log view.
 fn render_ovpn_detail(frame: &mut Frame, app: &App, area: Rect, focused: bool) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
     let Some(profile) = app.selected_profile() else {
         return;
     };
@@ -367,7 +367,11 @@ fn render_status(frame: &mut Frame, app: &App, area: Rect) {
 fn render_popup(frame: &mut Frame, app: &App, area: Rect) {
     let (title, body, width_pct, height_pct) = match &app.popup {
         Popup::None => return,
-        Popup::Help => (" Help (?) ", help_text().to_owned(), 80, 80),
+        Popup::Help => {
+            let mut body = help_text().to_owned();
+            body.push_str("\nq / ? / Enter / Esc closes this help");
+            (" Help (?) ", body, 80, 80)
+        }
         Popup::Sudo => {
             let masked: String =
                 std::iter::repeat_n(MASK_GLYPH, app.sudo_input.chars().count()).collect();
@@ -385,7 +389,7 @@ fn render_popup(frame: &mut Frame, app: &App, area: Rect) {
                 VpnType::OpenVpn => "openvpn",
             };
             let text = format!(
-                "source path (absolute or ~):\n{}\nbackend: {backend}  (Tab toggles)\nnote: .ovpn implies openvpn\nEnter: import   Esc: cancel",
+                "source path (absolute or ~):\n{}▌\nbackend: {backend}  (Tab toggles)\nnote: .ovpn implies openvpn\nEnter: import   Esc: cancel",
                 app.import_input
             );
             (" Import ", text, 70, 50)
