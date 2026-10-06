@@ -82,9 +82,9 @@ Press `?` in the app for the full table. Essentials:
    into place — `awg/awgN.conf` for AWG (short interface-safe names,
    since `awg-quick` derives the interface from the file stem) and
    sanitized names for OpenVPN — `original_filename` kept verbatim,
-   both listed with readable display names. (`.ovpn` implies the
-   openvpn backend, `.conf` implies awg; files with any other
-   extension defer to the popup toggle.)
+   both listed with readable display names. (Typing a path ending in
+   `.ovpn`/`.conf` flips the backend switch as you type; Tab overrides
+   it — whatever the switch shows at Enter wins.)
 2. **Connect/disconnect each backend.** `Enter` on the AWG profile →
    `connected`, `awg show` text + handshake/transfer summary in the
    right pane, header `exit` IP updates. `d` → `disconnected`.

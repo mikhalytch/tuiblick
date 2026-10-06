@@ -423,17 +423,28 @@ pub fn clean_import_path(raw: &str) -> Result<String, String> {
     }
 }
 
-/// `.ovpn` (any case) implies OpenVPN, `.conf` (any case) implies AWG —
-/// anything else defers to the popup's toggled backend.
-pub fn infer_import_vpn(path: &str, default: VpnType) -> VpnType {
-    let ext = Path::new(path)
+/// Backend implied by the typed path's extension: `.ovpn` → OpenVPN,
+/// `.conf` → AWG, anything else → `None` (leave the switch alone, so a
+/// manual Tab choice survives).
+pub fn infer_import_vpn(path: &str) -> Option<VpnType> {
+    let ext = Path::new(path.trim_end())
         .extension()
         .map(|ext| ext.to_string_lossy().to_lowercase())
         .unwrap_or_default();
     match ext.as_str() {
-        "ovpn" => VpnType::OpenVpn,
-        "conf" => VpnType::Awg,
-        _ => default,
+        "ovpn" => Some(VpnType::OpenVpn),
+        "conf" => Some(VpnType::Awg),
+        _ => None,
+    }
+}
+
+/// The backend switch follows the typed path: a trailing `.ovpn`/`.conf`
+/// flips it, anything else keeps the current (possibly toggled) choice.
+/// Runs on every text edit — never on Tab, so a manual toggle sticks
+/// until the next keystroke.
+fn follow_input_backend(app: &mut App) {
+    if let Some(vpn) = infer_import_vpn(&app.import_input) {
+        app.import_vpn = vpn;
     }
 }
 
@@ -455,7 +466,7 @@ pub fn help_text() -> &'static str {
      Enter, c       connect selected (c clears the OpenVPN log view when the detail pane is focused)\n\
      d              disconnect active tunnel\n\
      r              rename selected profile (config rescan is automatic)\n\
-     i              import file (Tab toggles awg/openvpn)\n\
+     i              import file (.ovpn/.conf flips backend, Tab toggles)\n\
      D              delete profile (confirm)\n\
      /              filter openvpn logs\n\
      f              follow toggle\n\
@@ -748,9 +759,12 @@ fn handle_import_key(app: &mut App, key: KeyEvent) {
         }
         KeyCode::Backspace => {
             app.import_input.pop();
+            follow_input_backend(app);
         }
         _ => {
-            push_text_key(&mut app.import_input, key);
+            if push_text_key(&mut app.import_input, key) {
+                follow_input_backend(app);
+            }
         }
     }
 }
@@ -1135,7 +1149,7 @@ fn submit_import(app: &mut App) {
             return;
         }
     };
-    let vpn = infer_import_vpn(&cleaned, app.import_vpn);
+    let vpn = app.import_vpn;
     match config::import_file(Path::new(&cleaned), vpn) {
         Ok(profile) => match config::scan_and_reconcile() {
             Ok(profiles) => {
@@ -1916,22 +1930,33 @@ mod tests {
 
     #[test]
     fn import_vpn_inference() {
-        assert_eq!(infer_import_vpn("tun.ovpn", VpnType::Awg), VpnType::OpenVpn);
-        assert_eq!(infer_import_vpn("TUN.OVPN", VpnType::Awg), VpnType::OpenVpn);
-        // `.conf` implies AWG even when the toggle points at OpenVPN.
-        assert_eq!(infer_import_vpn("a.conf", VpnType::Awg), VpnType::Awg);
-        assert_eq!(infer_import_vpn("a.conf", VpnType::OpenVpn), VpnType::Awg);
-        assert_eq!(infer_import_vpn("A.CONF", VpnType::OpenVpn), VpnType::Awg);
-        // No (or other) extension: defer to the popup toggle.
-        assert_eq!(infer_import_vpn("no-ext", VpnType::Awg), VpnType::Awg);
-        assert_eq!(
-            infer_import_vpn("no-ext", VpnType::OpenVpn),
-            VpnType::OpenVpn
-        );
-        assert_eq!(
-            infer_import_vpn("tun.txt", VpnType::OpenVpn),
-            VpnType::OpenVpn
-        );
+        assert_eq!(infer_import_vpn("tun.ovpn"), Some(VpnType::OpenVpn));
+        assert_eq!(infer_import_vpn("TUN.OVPN"), Some(VpnType::OpenVpn));
+        assert_eq!(infer_import_vpn("a.conf"), Some(VpnType::Awg));
+        assert_eq!(infer_import_vpn("A.CONF"), Some(VpnType::Awg));
+        assert_eq!(infer_import_vpn("tun.ovpn "), Some(VpnType::OpenVpn));
+        assert_eq!(infer_import_vpn("no-ext"), None);
+        assert_eq!(infer_import_vpn("tun.txt"), None);
+        assert_eq!(infer_import_vpn(""), None);
+    }
+
+    #[test]
+    fn import_switch_follows_input_but_tab_has_last_word() {
+        let mut app = empty_app(true);
+        // Typing a path flips the switch to the implied backend.
+        app.import_input = "tun.ovpn".to_owned();
+        follow_input_backend(&mut app);
+        assert_eq!(app.import_vpn, VpnType::OpenVpn);
+        // Manual Tab sticks while the text is untouched...
+        app.import_vpn = VpnType::Awg;
+        // ...and survives edits that imply nothing...
+        app.import_input = "tun.ovp".to_owned();
+        follow_input_backend(&mut app);
+        assert_eq!(app.import_vpn, VpnType::Awg);
+        // ...but the next implying keystroke flips it again.
+        app.import_input = "tun.ovpn".to_owned();
+        follow_input_backend(&mut app);
+        assert_eq!(app.import_vpn, VpnType::OpenVpn);
     }
 
     #[test]

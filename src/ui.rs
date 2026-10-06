@@ -389,7 +389,7 @@ fn render_popup(frame: &mut Frame, app: &App, area: Rect) {
                 VpnType::OpenVpn => "openvpn",
             };
             let text = format!(
-                "source path (absolute or ~):\n{}▌\nbackend: {backend}  (Tab toggles)\nnote: .ovpn → openvpn, .conf → awg\nEnter: import   Esc: cancel",
+                "source path (absolute or ~):\n{}▌\nbackend: {backend}  (Tab toggles)\nnote: ending in .ovpn/.conf flips it — Tab has the last word\nEnter: import   Esc: cancel",
                 app.import_input
             );
             (" Import ", text, 70, 50)
