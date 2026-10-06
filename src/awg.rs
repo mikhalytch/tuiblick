@@ -58,10 +58,14 @@ pub async fn down(runner: &SudoRunner, conf_path: &Path) -> Result<String, AppEr
     run_backend(runner, &prog, argv).await
 }
 
-/// Raw `awg show <iface>` text (unparsed; feed to [`parse_summary`]).
+/// Raw `awg show` text (all interfaces, unparsed; feed to [`parse_summary`]).
+///
+/// Deliberately no interface argument: on macOS the live interface is a
+/// system-assigned `utunN` name (e.g. `interface: utun4`), not the config
+/// file stem, so `awg show <stem>` fails with "Unable to access interface".
 /// Same error contract as [`up`].
-pub async fn show(runner: &SudoRunner, iface: &str) -> Result<String, AppError> {
-    let (prog, argv) = show_command(iface);
+pub async fn show(runner: &SudoRunner) -> Result<String, AppError> {
+    let (prog, argv) = show_command();
     run_backend(runner, &prog, argv).await
 }
 
@@ -198,9 +202,9 @@ pub(crate) fn down_command(conf_path: &Path) -> (String, Vec<String>) {
     )
 }
 
-/// `(program, argv)` for `awg show <iface>`.
-pub(crate) fn show_command(iface: &str) -> (String, Vec<String>) {
-    ("awg".to_owned(), vec!["show".to_owned(), iface.to_owned()])
+/// `(program, argv)` for a bare `awg show` (whole dump, all interfaces).
+pub(crate) fn show_command() -> (String, Vec<String>) {
+    ("awg".to_owned(), vec!["show".to_owned()])
 }
 
 /// Full config path as one argv element. Non-UTF8 paths are lossy-converted;
@@ -350,10 +354,12 @@ peer: def4567890abc=
     }
 
     #[test]
-    fn show_argv_is_awg_show_iface() {
-        let (prog, argv) = show_command("awg0");
+    fn show_argv_is_bare_awg_show() {
+        // No interface argument: the live name is a system-assigned utunN,
+        // not the config stem — `awg show <stem>` fails at poll time.
+        let (prog, argv) = show_command();
         assert_eq!(prog, "awg");
-        assert_eq!(argv, vec!["show".to_owned(), "awg0".to_owned()]);
+        assert_eq!(argv, vec!["show".to_owned()]);
     }
 
     #[test]
@@ -451,6 +457,44 @@ peer: def4567890abc=
         );
         assert_eq!(s.rx.as_deref(), Some("1.23 MiB"));
         assert_eq!(s.tx.as_deref(), Some("456.78 KiB"));
+    }
+
+    #[test]
+    fn parse_summary_on_live_macos_utun_dump() {
+        // Real `awg show` shape (macOS, interface utun4, Amnezia jc/jmin/
+        // jmax/s1/s2/h1-h4 fields, keys hidden). The poll shows this whole
+        // dump — never `awg show <config-stem>` (that fails poll-side).
+        let raw = "\
+interface: utun4
+  public key: HfW8VM3dngM0+pWPI/F89iZjN/IGVR1nwilhgvuoYh0=
+  private key: (hidden)
+  listening port: 62026
+  jc: 9
+  jmin: 50
+  jmax: 1000
+  s1: 145
+  s2: 126
+  h1: 1634537701
+  h2: 459993384
+  h3: 1640229175
+  h4: 146481381
+
+peer: dM4ZrplmGMkCzwo9R5g8BBO3EMtaFzxHP2GOE7tYXR0=
+  preshared key: (hidden)
+  endpoint: 216.173.69.190:443
+  allowed ips: 0.0.0.0/0
+  latest handshake: 1 minute, 5 seconds ago
+  transfer: 5.14 MiB received, 9.17 MiB sent
+  persistent keepalive: every 25 seconds
+";
+        let s = parse_summary(raw);
+        assert_eq!(s.peers, 1, "got {s:?}");
+        assert_eq!(
+            s.latest_handshake.as_deref(),
+            Some("1 minute, 5 seconds ago")
+        );
+        assert_eq!(s.rx.as_deref(), Some("5.14 MiB"));
+        assert_eq!(s.tx.as_deref(), Some("9.17 MiB"));
     }
 
     #[test]

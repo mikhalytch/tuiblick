@@ -1677,22 +1677,14 @@ fn complete_ovpn_down(
 }
 
 /// 3 s AWG poll, and ONLY while an AWG tunnel is up (spec §4).
-/// Overlap is guarded by `awg_poll_inflight`.
+/// Polls the whole `awg show` dump (the live interface is a
+/// system-assigned utunN, not the config stem). Overlap is guarded by
+/// `awg_poll_inflight`.
 fn maybe_poll_awg(app: &mut App, tx: &UnboundedSender<BackendMsg>) {
     if app.phase != ConnPhase::Connected || app.awg_poll_inflight {
         return;
     }
-    let Some(awg_id) = app
-        .active_of_kind(VpnType::Awg)
-        .map(|a| a.profile_id.clone())
-    else {
-        return;
-    };
-    let Some(profile) = app.profiles.iter().find(|p| p.id == awg_id).cloned() else {
-        return;
-    };
-    let iface = iface_of(&profile.stored_path());
-    if iface.is_empty() {
+    if app.active_of_kind(VpnType::Awg).is_none() {
         return;
     }
     app.awg_poll_inflight = true;
@@ -1700,7 +1692,7 @@ fn maybe_poll_awg(app: &mut App, tx: &UnboundedSender<BackendMsg>) {
     let task_tx = tx.clone();
     let sudo = Arc::clone(&app.sudo);
     tokio::spawn(async move {
-        let result = crate::awg::show(&sudo, &iface).await;
+        let result = crate::awg::show(&sudo).await;
         let _ = task_tx.send(BackendMsg::AwgPoll { gen, result });
     });
 }
@@ -1783,13 +1775,6 @@ fn profile_name(app: &App, id: &str) -> String {
         .find(|p| p.id == id)
         .map(|p| p.display_name.clone())
         .unwrap_or_else(|| id.to_owned())
-}
-
-/// Interface name for `awg show`: the stored file's stem.
-fn iface_of(path: &Path) -> String {
-    path.file_stem()
-        .map(|stem| stem.to_string_lossy().into_owned())
-        .unwrap_or_default()
 }
 
 fn now_rfc3339() -> String {

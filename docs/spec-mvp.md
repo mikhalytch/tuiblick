@@ -103,7 +103,8 @@ Rules:
 - Both short-lived via `tokio::process::Command`, combined output
   captured, last output kept for the status pane, errors surfaced.
 - Status (only for the active AWG profile, every 3 s):
-  `awg show <iface>` (raw text shown) + best-effort parse of
+  `awg show` (whole dump, raw text shown — the live interface is a
+  system-assigned `utunN`, not the config stem) + best-effort parse of
   `latest handshake`, `transfer rx/tx`, peer count. Parse failures
   never fail the poll — raw text is the source of truth.
 - At most one tunnel per backend in MVP (one AWG + one OpenVPN may be up
