@@ -267,11 +267,9 @@ fn render_awg_detail(frame: &mut Frame, app: &App, area: Rect, focused: bool, pr
     }
     let mut left = lines;
     left.extend(peer_lines.into_iter().map(Line::from));
-    let mut right = vec![Line::styled(
-        "interface",
-        Style::default().fg(Color::DarkGray),
-    )];
-    right.extend(iface_lines.into_iter().map(Line::from));
+    // No column label: the section's own first line already says
+    // `interface: …`.
+    let right: Vec<Line> = iface_lines.into_iter().map(Line::from).collect();
     let cols = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
