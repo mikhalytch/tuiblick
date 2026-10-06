@@ -236,6 +236,17 @@ impl OpenVpnSession {
             .unwrap_or_default()
     }
 
+    /// Advance the shared ring's view watermark (spec §5 `c` clears the
+    /// view, never the backing buffer). Locks only for the call, never
+    /// across await (sync). The `c` handler also clears its cached copy
+    /// for immediate render; without this the next 200 ms
+    /// `refresh_ovpn_cache` snapshot would resurrect the cleared lines.
+    pub fn clear_view(&self) {
+        if let Ok(mut ring) = self.logs.lock() {
+            ring.clear_view();
+        }
+    }
+
     /// True when the `.ovpn` contains a bare `daemon` directive: the first
     /// whitespace-separated token of a line equals `daemon`
     /// (ASCII case-insensitive), so `daemon`, `DAEMON`, `daemon 1`, and
@@ -394,6 +405,41 @@ mod tests {
         ring.push("c".to_owned());
         assert_eq!(ring.lines(), vec!["c".to_owned()]);
         assert_eq!(ring.backing_len(), 3);
+    }
+
+    #[tokio::test]
+    async fn session_clear_view_survives_snapshot() {
+        // `c` while connected must survive the 200 ms refresh tick, which
+        // overwrites the cached copy with `session.snapshot()`. Manual
+        // pushes (same lock the readers use) keep this hermetic and fast.
+        let mut sess =
+            OpenVpnSession::spawn_command_for_test("sleep", &["30"]).expect("spawn sleep");
+        {
+            let mut ring = sess.logs.lock().expect("ring lock");
+            ring.push("line one".to_owned());
+            ring.push("line two".to_owned());
+        }
+        assert_eq!(sess.snapshot().len(), 2);
+        let backing_before = sess.snapshot().backing_len();
+        assert_eq!(backing_before, 2);
+        sess.clear_view();
+        let after = sess.snapshot();
+        assert_eq!(after.len(), 0, "view must be empty after clear_view");
+        assert_eq!(
+            after.backing_len(),
+            backing_before,
+            "backing buffer must be preserved"
+        );
+        assert_eq!(after.raw_lines().len(), backing_before);
+        // Lines pushed after the clear are visible again.
+        {
+            let mut ring = sess.logs.lock().expect("ring lock");
+            ring.push("line three".to_owned());
+        }
+        let resumed = sess.snapshot();
+        assert_eq!(resumed.lines(), vec!["line three".to_owned()]);
+        assert_eq!(resumed.backing_len(), backing_before + 1);
+        sess.stop().await;
     }
 
     fn temp_ovpn(name: &str, contents: &str) -> std::path::PathBuf {

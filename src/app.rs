@@ -654,6 +654,9 @@ fn handle_normal_key(app: &mut App, tx: &UnboundedSender<BackendMsg>, key: KeyEv
                     .is_some_and(|a| a.kind == VpnType::OpenVpn)
             {
                 app.ovpn_logs.clear_view();
+                if let Some(session) = app.ovpn_session.as_ref() {
+                    session.clear_view();
+                }
                 set_status(
                     app,
                     "log view cleared (backing buffer kept — s still saves all)",
@@ -1002,6 +1005,16 @@ fn open_delete_confirm(app: &mut App) {
         );
         return;
     }
+    if is_pending_connect_target(app, &profile.id) {
+        show_error(
+            app,
+            format!(
+                "cannot delete \"{}\" while it is connecting — cancel first",
+                profile.display_name
+            ),
+        );
+        return;
+    }
     app.popup = Popup::Confirm(ConfirmKind::Delete {
         profile_id: profile.id,
         display_name: profile.display_name,
@@ -1016,6 +1029,13 @@ fn do_delete_profile(app: &mut App, id: &str) {
         );
         return;
     }
+    if is_pending_connect_target(app, id) {
+        show_error(
+            app,
+            "cannot delete profile while it is connecting — cancel first".to_owned(),
+        );
+        return;
+    }
     match config::delete_profile(id) {
         Ok(()) => {
             app.profiles.retain(|p| p.id != id);
@@ -1024,6 +1044,15 @@ fn do_delete_profile(app: &mut App, id: &str) {
         }
         Err(e) => show_error(app, format!("delete failed: {e}")),
     }
+}
+
+/// True when `id` is the in-flight connect target (phase Connecting with
+/// `pending_connect` pointing at it). Deleting it would orphan the tunnel
+/// that is about to come up, so both delete paths block it.
+fn is_pending_connect_target(app: &App, id: &str) -> bool {
+    app.pending_connect
+        .and_then(|i| app.profiles.get(i))
+        .is_some_and(|p| p.id == id)
 }
 
 fn open_import(app: &mut App) {
@@ -1906,5 +1935,50 @@ mod tests {
         let action = app.request_connect(0);
         assert!(matches!(action, ConnectAction::Ignored(_)));
         assert_eq!(app.popup, Popup::None);
+    }
+
+    #[test]
+    fn delete_blocked_while_connecting_pending() {
+        // Enter on P (Connecting) then D: the confirm popup must NOT open.
+        let mut app = empty_app(true);
+        app.profiles = vec![
+            sample_profile("a", "office", VpnType::Awg),
+            sample_profile("b", "tunnel", VpnType::OpenVpn),
+        ];
+        app.selected = 0;
+        app.phase = ConnPhase::Connecting;
+        app.pending_connect = Some(0);
+        open_delete_confirm(&mut app);
+        assert!(
+            !matches!(app.popup, Popup::Confirm(_)),
+            "no confirm popup while connecting, got {:?}",
+            app.popup
+        );
+        assert!(
+            !app.status_message.is_empty(),
+            "a status error must explain the connecting block"
+        );
+        assert_eq!(app.profiles.len(), 2);
+    }
+
+    #[test]
+    fn do_delete_profile_blocked_for_pending_target() {
+        let mut app = empty_app(true);
+        app.profiles = vec![
+            sample_profile("a", "office", VpnType::Awg),
+            sample_profile("b", "tunnel", VpnType::OpenVpn),
+        ];
+        app.phase = ConnPhase::Connecting;
+        app.pending_connect = Some(0);
+        do_delete_profile(&mut app, "a");
+        assert_eq!(app.profiles.len(), 2, "pending profile must survive");
+        assert!(app.profiles.iter().any(|p| p.id == "a"));
+        assert!(
+            !app.status_message.is_empty(),
+            "a status error must explain the connecting block"
+        );
+        // Guard is target-scoped: the other profile is not a pending target.
+        assert!(!is_pending_connect_target(&app, "b"));
+        assert!(is_pending_connect_target(&app, "a"));
     }
 }
