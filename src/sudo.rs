@@ -142,6 +142,48 @@ impl SudoRunner {
         self.classify(cmd_display, output)
     }
 
+    /// Spawn a long-lived backend child without waiting for it (openvpn, Task 5).
+    ///
+    /// Mirrors [`run`](Self::run): root mode spawns `prog` directly, otherwise
+    /// `sudo -S -p <sentinel> prog ...args` with the password piped once and
+    /// stdin then closed, so sudo sees EOF instead of hanging on a
+    /// terminal-less read. Non-root with no password stored fails fast with
+    /// [`AppError::User`] (the caller prompts first) — a spawn here never
+    /// blocks waiting on a sudo prompt.
+    ///
+    /// Unlike [`run`](Self::run), auth failures CANNOT be reported here: the
+    /// child is still starting. A wrong password surfaces as sudo error lines
+    /// in the child's captured stderr; the caller sniffs the log for that.
+    /// Paths with spaces/unicode stay single argv elements (no shell).
+    pub(crate) async fn spawn_long_lived(
+        &self,
+        prog: &str,
+        args: &[&str],
+    ) -> Result<tokio::process::Child, AppError> {
+        if !self.is_root && !self.has_password() {
+            return Err(AppError::User("sudo password required".to_owned()));
+        }
+        let (program, argv) = command_line(self.is_root, prog, args);
+        let mut child = tokio::process::Command::new(&program)
+            .args(&argv)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .map_err(AppError::Io)?;
+
+        // Same no-hang contract as `run`: write once, then close stdin.
+        // With no password stored the handle is dropped immediately and a
+        // timestamp-less sudo fails fast instead of blocking.
+        if let Some(stdin) = child.stdin.take() {
+            let mut stdin = stdin;
+            if let Some(secret) = self.password_bytes() {
+                let _ = stdin.write_all(secret.as_slice()).await;
+            }
+        }
+        Ok(child)
+    }
+
     /// Map a finished child to `Ok` / `SudoAuth` / `Process`, dropping the
     /// stored password on auth failure so the caller re-prompts.
     fn classify(&self, cmd_display: String, output: Output) -> Result<Output, AppError> {

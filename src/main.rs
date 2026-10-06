@@ -2,6 +2,7 @@ mod app;
 mod awg;
 mod config;
 mod errors;
+mod openvpn;
 mod sudo;
 
 use crossterm::{
