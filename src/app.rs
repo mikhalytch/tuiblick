@@ -2433,38 +2433,10 @@ mod tests {
     #[test]
     fn ctrl_j_k_reorders_selection_and_persists() {
         // Redirect the config root for this test only (restored on drop,
-        // even on panic). Files are seeded so `is_missing()` answers are
-        // deterministic for any concurrent reader.
-        struct EnvRoot {
-            old: Option<String>,
-            dir: std::path::PathBuf,
-        }
-        impl EnvRoot {
-            fn set(tag: &str) -> Self {
-                let dir = std::env::temp_dir()
-                    .join(format!("tuiblick-move-app-{tag}-{}", std::process::id()));
-                let _ = std::fs::remove_dir_all(&dir);
-                std::fs::create_dir_all(dir.join("awg")).unwrap();
-                std::fs::create_dir_all(dir.join("openvpn")).unwrap();
-                std::fs::write(dir.join("awg/office.conf"), "x").unwrap();
-                std::fs::write(dir.join("openvpn/tunnel.ovpn"), "x").unwrap();
-                std::fs::write(dir.join("awg/branch.conf"), "x").unwrap();
-                let old = std::env::var("TUIBLICK_CONFIG_DIR").ok();
-                std::env::set_var("TUIBLICK_CONFIG_DIR", &dir);
-                Self { old, dir }
-            }
-        }
-        impl Drop for EnvRoot {
-            fn drop(&mut self) {
-                match &self.old {
-                    Some(v) => std::env::set_var("TUIBLICK_CONFIG_DIR", v),
-                    None => std::env::remove_var("TUIBLICK_CONFIG_DIR"),
-                }
-                let _ = std::fs::remove_dir_all(&self.dir);
-            }
-        }
-
-        let _guard = EnvRoot::set("keys");
+        let _guard = TempConfig::fresh(
+            "keys",
+            &["awg/office.conf", "openvpn/tunnel.ovpn", "awg/branch.conf"],
+        );
         let seed = vec![
             sample_profile("a", "office", VpnType::Awg),
             sample_profile("b", "tunnel", VpnType::OpenVpn),
@@ -2511,15 +2483,23 @@ mod tests {
 
     /// Redirect the config root at a fresh temp dir for one test (restored
     /// on drop, even on panic). Seed `files` (config-relative paths) so
-    /// `is_missing()` answers are deterministic for any concurrent reader.
+    /// `is_missing()` answers are deterministic.
+    ///
+    /// All users share one process-wide lock: `TUIBLICK_CONFIG_DIR` is
+    /// process-global, so parallel tests must not point it at different
+    /// dirs at once (last-writer-wins reads = flakes).
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     struct TempConfig {
         old: Option<String>,
         dir: std::path::PathBuf,
+        _env_lock: std::sync::MutexGuard<'static, ()>,
     }
     impl TempConfig {
         fn fresh(tag: &str, files: &[&str]) -> Self {
+            let env_lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
             let dir =
-                std::env::temp_dir().join(format!("tuiblick-batch-{tag}-{}", std::process::id()));
+                std::env::temp_dir().join(format!("tuiblick-test-{tag}-{}", std::process::id()));
             let _ = std::fs::remove_dir_all(&dir);
             for f in files {
                 let path = dir.join(f);
@@ -2528,7 +2508,11 @@ mod tests {
             }
             let old = std::env::var("TUIBLICK_CONFIG_DIR").ok();
             std::env::set_var("TUIBLICK_CONFIG_DIR", &dir);
-            Self { old, dir }
+            Self {
+                old,
+                dir,
+                _env_lock: env_lock,
+            }
         }
     }
     impl Drop for TempConfig {
