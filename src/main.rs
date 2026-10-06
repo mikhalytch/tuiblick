@@ -1,6 +1,7 @@
 mod app;
 mod config;
 mod errors;
+mod sudo;
 
 use crossterm::{
     execute,
