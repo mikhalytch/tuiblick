@@ -79,9 +79,12 @@ Press `?` in the app for the full table. Essentials:
 1. **Import with weird names.** `i`, import an AWG conf and an
    `.ovpn` whose names contain spaces, parentheses, and unicode
    (e.g. `My Office (1).conf`, `café vpn.ovpn`). Expect: copied
-   under sanitized names, `original_filename` kept verbatim,
-   both listed. (`.ovpn` implies the openvpn backend, `.conf` implies
-   awg; files with any other extension defer to the popup toggle.)
+   into place — `awg/awgN.conf` for AWG (short interface-safe names,
+   since `awg-quick` derives the interface from the file stem) and
+   sanitized names for OpenVPN — `original_filename` kept verbatim,
+   both listed with readable display names. (`.ovpn` implies the
+   openvpn backend, `.conf` implies awg; files with any other
+   extension defer to the popup toggle.)
 2. **Connect/disconnect each backend.** `Enter` on the AWG profile →
    `connected`, `awg show` text + handshake/transfer summary in the
    right pane, header `exit` IP updates. `d` → `disconnected`.

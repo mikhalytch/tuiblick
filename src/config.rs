@@ -281,29 +281,52 @@ fn import_file_in(root: &Path, src: &Path, vpn: VpnType) -> Result<Profile, AppE
         Some((stem, ext)) => (stem, Some(ext)),
         None => (original_filename.as_str(), None),
     };
-    let base = sanitize_filename(stem_raw);
-    let ext = match ext_raw.map(str::to_lowercase) {
-        Some(ext) if vpn.allows_extension(&ext) => ext,
-        _ => vpn.default_extension().to_string(),
-    };
     let profiles = load_profiles_in(root)?;
     let taken: HashSet<&str> = profiles.iter().map(|p| p.stored_file.as_str()).collect();
     let dir = root.join(vpn.subdir());
     fs::create_dir_all(&dir)?;
-    let mut candidate = format!("{base}.{ext}");
-    let mut n = 2;
-    while dir.join(&candidate).exists() || taken.contains(stored_name(vpn, &candidate).as_str()) {
-        candidate = format!("{base}-{n}.{ext}");
-        n += 1;
-    }
+    // Stored filename + list name depend on the backend. `awg-quick up <path>`
+    // derives the interface name from the file stem, which must be a valid
+    // interface name (short, <=15 chars) — so AWG configs are stored as
+    // `awgN.conf` while the list keeps the human-readable original stem.
+    // `openvpn --config` accepts any path, so OpenVPN keeps the sanitized name.
+    let (candidate, display_name) = match vpn {
+        VpnType::Awg => {
+            let mut candidate = String::new();
+            for n in 0u32.. {
+                let c = format!("awg{n}.conf");
+                if !dir.join(&c).exists() && !taken.contains(stored_name(vpn, &c).as_str()) {
+                    candidate = c;
+                    break;
+                }
+            }
+            (candidate, stem_raw.to_owned())
+        }
+        VpnType::OpenVpn => {
+            let base = sanitize_filename(stem_raw);
+            let ext = match ext_raw.map(str::to_lowercase) {
+                Some(ext) if vpn.allows_extension(&ext) => ext,
+                _ => vpn.default_extension().to_string(),
+            };
+            let mut candidate = format!("{base}.{ext}");
+            let mut n = 2;
+            while dir.join(&candidate).exists()
+                || taken.contains(stored_name(vpn, &candidate).as_str())
+            {
+                candidate = format!("{base}-{n}.{ext}");
+                n += 1;
+            }
+            let stem = candidate
+                .rsplit_once('.')
+                .map_or(candidate.clone(), |(stem, _)| stem.to_string());
+            (candidate, stem)
+        }
+    };
     let rel = stored_name(vpn, &candidate);
     fs::copy(&src, dir.join(&candidate))?;
-    let stem = candidate
-        .rsplit_once('.')
-        .map_or(candidate.as_str(), |(stem, _)| stem);
     let profile = Profile {
         id: uuid::Uuid::new_v4().to_string(),
-        display_name: stem.to_string(),
+        display_name,
         vpn_type: vpn,
         stored_file: rel,
         original_filename,
@@ -319,8 +342,10 @@ fn stored_name(vpn: VpnType, filename: &str) -> String {
     format!("{}/{}", vpn.subdir(), filename)
 }
 
-/// Copy `src` (absolute or `~`-prefixed) into the backend subdir under
-/// the sanitized name, append the mapping, return the new profile.
+/// Copy `src` (absolute or `~`-prefixed) into the backend subdir and append
+/// the mapping, returning the new profile. AWG files are stored as short
+/// interface-safe `awgN.conf` names (the list keeps the original stem);
+/// OpenVPN files keep the sanitized name.
 /// The source file is never moved or deleted.
 pub fn import_file(src: &Path, vpn: VpnType) -> Result<Profile, AppError> {
     import_file_in(&config_root(), src, vpn)
@@ -482,12 +507,12 @@ mod tests {
         write_file(&src, "wg fixture");
         let p = import_file_in(&root, &src, VpnType::Awg).expect("import");
         assert_eq!(p.original_filename, "My Office (1).conf");
-        assert_eq!(p.display_name, "my-office-1");
-        assert_eq!(p.stored_file, "awg/my-office-1.conf");
+        assert_eq!(p.display_name, "My Office (1)");
+        assert_eq!(p.stored_file, "awg/awg0.conf");
         assert_eq!(p.vpn_type, VpnType::Awg);
         assert!(src.is_file(), "import copies, never moves");
         assert_eq!(
-            fs::read_to_string(root.join("awg/my-office-1.conf")).unwrap(),
+            fs::read_to_string(root.join("awg/awg0.conf")).unwrap(),
             "wg fixture"
         );
         let mapped = load_profiles_in(&root).expect("reload");
@@ -507,16 +532,43 @@ mod tests {
         write_file(&second, "two");
         let a = import_file_in(&root, &first, VpnType::Awg).expect("import 1");
         let b = import_file_in(&root, &second, VpnType::Awg).expect("import 2");
-        assert_eq!(a.stored_file, "awg/dup.conf");
-        assert_eq!(b.stored_file, "awg/dup-2.conf");
-        assert_eq!(b.display_name, "dup-2");
+        assert_eq!(a.stored_file, "awg/awg0.conf");
+        assert_eq!(b.stored_file, "awg/awg1.conf");
+        assert_eq!(a.display_name, "dup");
+        assert_eq!(b.display_name, "dup");
         assert_eq!(
-            fs::read_to_string(root.join("awg/dup.conf")).unwrap(),
+            fs::read_to_string(root.join("awg/awg0.conf")).unwrap(),
             "one"
         );
         assert_eq!(
-            fs::read_to_string(root.join("awg/dup-2.conf")).unwrap(),
+            fs::read_to_string(root.join("awg/awg1.conf")).unwrap(),
             "two"
+        );
+        cleanup(&root);
+        cleanup(&srcdir);
+    }
+
+    #[test]
+    fn awg_import_uses_short_interface_safe_name() {
+        // `awg-quick up <path>` derives the interface name from the file
+        // stem: a long sanitized name fails at connect time, so AWG imports
+        // are stored as awgN.conf (see reported exmo-...-dev.conf failure).
+        let root = test_root("awg-iface");
+        let srcdir = test_root("awg-iface-src");
+        let src = srcdir.join("exmo-amnezia-20251024-aleksey_mikhailov-dev.conf");
+        write_file(&src, "wg fixture");
+        let p = import_file_in(&root, &src, VpnType::Awg).expect("import");
+        assert_eq!(p.stored_file, "awg/awg0.conf");
+        assert_eq!(
+            p.display_name,
+            "exmo-amnezia-20251024-aleksey_mikhailov-dev"
+        );
+        let stem = "awg0";
+        assert!(stem.len() <= 15);
+        assert!(
+            stem.bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-'),
+            "stem must be interface-safe"
         );
         cleanup(&root);
         cleanup(&srcdir);
