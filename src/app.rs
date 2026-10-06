@@ -58,6 +58,9 @@ use crate::sudo::{
 const RENDER_TICK: Duration = Duration::from_millis(200);
 /// AWG status poll, only while the active tunnel is AWG (spec §4).
 const AWG_POLL_INTERVAL: Duration = Duration::from_secs(3);
+/// Config-dir rescan: external adds/removes are picked up automatically,
+/// so there is no manual rescan key (`r` renames the selected profile).
+const RESCAN_INTERVAL: Duration = Duration::from_secs(5);
 /// Blocking event-thread poll quantum (also bounds thread shutdown delay).
 const EVENT_POLL_TIMEOUT: Duration = Duration::from_millis(200);
 /// Detail-pane scroll steps for `j/k` vs PgUp/PgDn.
@@ -108,7 +111,8 @@ pub enum ConfirmKind {
 }
 
 /// Popup overlays: spec states `ErrorPopup | HelpPopup | SudoPrompt |
-/// ImportPrompt | ConfirmPopup` (`None` = no overlay).
+/// ImportPrompt | ConfirmPopup` (`None` = no overlay). `Rename` is an
+/// addition for the `r` (rename profile) prompt.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum Popup {
     #[default]
@@ -116,6 +120,7 @@ pub enum Popup {
     Help,
     Sudo,
     Import,
+    Rename,
     Confirm(ConfirmKind),
     Error(String),
 }
@@ -183,6 +188,7 @@ pub struct App {
     pub conn_gen: u64,
     pub import_input: String,
     pub import_vpn: VpnType,
+    pub rename_input: String,
     pub filter_editing: bool,
     pub filter_input: String,
     pub log_filter: String,
@@ -224,6 +230,7 @@ impl App {
             conn_gen: 0,
             import_input: String::new(),
             import_vpn: VpnType::Awg,
+            rename_input: String::new(),
             filter_editing: false,
             filter_input: String::new(),
             log_filter: String::new(),
@@ -446,7 +453,7 @@ pub fn help_text() -> &'static str {
      Tab, 1/2/3    switch pane focus (list / detail)\n\
      Enter, c       connect selected (c clears the OpenVPN log view when the detail pane is focused)\n\
      d              disconnect active tunnel\n\
-     r              rescan config dirs\n\
+     r              rename selected profile (config rescan is automatic)\n\
      i              import file (Tab toggles awg/openvpn)\n\
      D              delete profile (confirm)\n\
      /              filter openvpn logs\n\
@@ -538,6 +545,8 @@ pub async fn run() -> anyhow::Result<()> {
     render_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut awg_tick = tokio::time::interval(AWG_POLL_INTERVAL);
     awg_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut rescan_tick = tokio::time::interval(RESCAN_INTERVAL);
+    rescan_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
     loop {
         tokio::select! {
@@ -549,6 +558,7 @@ pub async fn run() -> anyhow::Result<()> {
                 terminal.draw(|frame| crate::ui::render(frame, &app))?;
             }
             _ = awg_tick.tick() => maybe_poll_awg(&mut app, &btx),
+            _ = rescan_tick.tick() => auto_rescan(&mut app),
         }
         if app.should_quit {
             break;
@@ -602,6 +612,7 @@ fn handle_key(app: &mut App, tx: &UnboundedSender<BackendMsg>, key: KeyEvent) {
     match app.popup.clone() {
         Popup::Sudo => handle_sudo_key(app, tx, key),
         Popup::Import => handle_import_key(app, key),
+        Popup::Rename => handle_rename_key(app, key),
         Popup::Confirm(_) => handle_confirm_key(app, tx, key),
         Popup::Help => {
             if matches!(
@@ -667,7 +678,7 @@ fn handle_normal_key(app: &mut App, tx: &UnboundedSender<BackendMsg>, key: KeyEv
         }
         KeyCode::Char('d') => do_disconnect(app, tx),
         KeyCode::Char('D') => open_delete_confirm(app),
-        KeyCode::Char('r') => do_rescan(app),
+        KeyCode::Char('r') => open_rename(app),
         KeyCode::Char('i') => open_import(app),
         KeyCode::Char('/') => {
             app.filter_editing = true;
@@ -1064,6 +1075,57 @@ fn open_import(app: &mut App) {
     app.popup = Popup::Import;
 }
 
+/// Open the rename prompt for the selected profile, prefilled with its
+/// current display name. Only the mapping changes (stored file untouched).
+fn open_rename(app: &mut App) {
+    let Some(profile) = app.selected_profile().cloned() else {
+        set_status(app, "no profile to rename");
+        return;
+    };
+    app.rename_input = profile.display_name;
+    app.popup = Popup::Rename;
+}
+
+fn handle_rename_key(app: &mut App, key: KeyEvent) {
+    match key.code {
+        KeyCode::Esc => {
+            app.popup = Popup::None;
+            set_status(app, "rename cancelled");
+        }
+        KeyCode::Enter => submit_rename(app),
+        KeyCode::Backspace => {
+            app.rename_input.pop();
+        }
+        _ => {
+            push_text_key(&mut app.rename_input, key);
+        }
+    }
+}
+
+fn submit_rename(app: &mut App) {
+    let Some(profile) = app.selected_profile().cloned() else {
+        app.popup = Popup::None;
+        set_status(app, "no profile to rename");
+        return;
+    };
+    let new_name = app.rename_input.trim().to_owned();
+    if new_name.is_empty() {
+        show_error(app, "profile name is empty".to_owned());
+        return;
+    }
+    match config::rename_profile(&profile.id, &new_name) {
+        Ok(()) => {
+            if let Some(entry) = app.profiles.iter_mut().find(|p| p.id == profile.id) {
+                entry.display_name = new_name.clone();
+            }
+            app.rename_input.clear();
+            app.popup = Popup::None;
+            set_status(app, format!("renamed to {new_name}"));
+        }
+        Err(e) => show_error(app, format!("rename failed: {e}")),
+    }
+}
+
 fn submit_import(app: &mut App) {
     let cleaned = match clean_import_path(&app.import_input.clone()) {
         Ok(path) => path,
@@ -1121,15 +1183,22 @@ fn save_log(app: &mut App) {
     }
 }
 
-fn do_rescan(app: &mut App) {
+/// Automatic rescan: picks up files added/removed outside the app and
+/// refreshes the `(missing)` badges. Runs on a timer (no manual key);
+/// stays quiet unless the list actually changed, so it never spams the
+/// status bar. Safe mid-connection: entries are only appended or flagged,
+/// never dropped, and selection is re-clamped.
+fn auto_rescan(app: &mut App) {
     match config::scan_and_reconcile() {
         Ok(profiles) => {
-            let count = profiles.len();
-            app.profiles = profiles;
-            app.clamp_selection();
-            set_status(app, format!("rescan: {count} profiles"));
+            if profiles != app.profiles {
+                let count = profiles.len();
+                app.profiles = profiles;
+                app.clamp_selection();
+                set_status(app, format!("auto-rescan: {count} profiles"));
+            }
         }
-        Err(e) => show_error(app, format!("rescan failed: {e}")),
+        Err(e) => set_status(app, format!("auto-rescan failed: {e}")),
     }
 }
 
@@ -1630,6 +1699,7 @@ mod tests {
             conn_gen: 0,
             import_input: String::new(),
             import_vpn: VpnType::Awg,
+            rename_input: String::new(),
             filter_editing: false,
             filter_input: String::new(),
             log_filter: String::new(),
@@ -1920,6 +1990,7 @@ mod tests {
             "Enter",
             "disconnect",
             "rescan",
+            "rename",
             "import",
             "follow",
             "sudo",
@@ -1935,6 +2006,35 @@ mod tests {
         let action = app.request_connect(0);
         assert!(matches!(action, ConnectAction::Ignored(_)));
         assert_eq!(app.popup, Popup::None);
+    }
+
+    #[test]
+    fn rename_opens_prefilled_prompt() {
+        let mut app = empty_app(true);
+        app.profiles = vec![sample_profile("a", "office", VpnType::Awg)];
+        open_rename(&mut app);
+        assert_eq!(app.popup, Popup::Rename);
+        assert_eq!(app.rename_input, "office");
+    }
+
+    #[test]
+    fn rename_with_no_profiles_reports_status() {
+        let mut app = empty_app(true);
+        open_rename(&mut app);
+        assert_eq!(app.popup, Popup::None);
+        assert!(!app.status_message.is_empty());
+    }
+
+    #[test]
+    fn rename_blank_name_shows_error_without_touching_fs() {
+        // Blank is rejected before any config write: hermetic (no fs).
+        let mut app = empty_app(true);
+        app.profiles = vec![sample_profile("a", "office", VpnType::Awg)];
+        app.popup = Popup::Rename;
+        app.rename_input = "   ".to_owned();
+        submit_rename(&mut app);
+        assert!(matches!(app.popup, Popup::Error(_)));
+        assert_eq!(app.profiles[0].display_name, "office");
     }
 
     #[test]

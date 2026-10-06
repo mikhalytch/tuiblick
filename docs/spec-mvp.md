@@ -67,7 +67,8 @@ Rules:
   trim, fallback `profile`, dedupe with `-2`, `-3` suffix. Keeps
   `awg-quick` interface-name happy while preserving the original name
   in the mapping.
-- Scan `awg/*.conf` + `openvpn/*.ovpn|*.conf` on start and on `r`.
+- Scan `awg/*.conf` + `openvpn/*.ovpn|*.conf` on start and automatically
+  every few seconds (there is no manual rescan key).
   Entries in `profiles.yaml` pointing at missing files show as
   `(missing)`; files on disk with no mapping get auto-registered
   (display name = file stem).
@@ -167,7 +168,7 @@ Keys (also listed under `?`):
 | `j/k`,↑↓  | move in list / scroll logs          |
 | `Enter/c` | connect selected                    |
 | `d`       | disconnect active                   |
-| `r`       | rescan config dirs                  |
+| `r`       | rename selected profile (rescan is automatic) |
 | `i`       | import file (path prompt)           |
 | `D`       | delete profile (confirm)            |
 | `/`       | filter logs (openvpn)               |
@@ -177,7 +178,7 @@ Keys (also listed under `?`):
 | `q`,Ctrl-C| disconnect? no — just quit (confirm if active) |
 
 States: `Profiles | Connecting | Connected | Disconnecting | ErrorPopup |
-HelpPopup | SudoPrompt | ImportPrompt | ConfirmPopup`. All backend
+HelpPopup | SudoPrompt | ImportPrompt | RenamePrompt | ConfirmPopup`. All backend
 work is async; the render loop never awaits a child.
 
 Quit with an active tunnel: confirm popup

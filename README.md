@@ -32,7 +32,7 @@ Press `?` inside the app for the full key table. Everything below is the short v
 | `Tab`, `1/2/3` | switch pane focus |
 | `Enter` / `c` | connect selected (`c` clears the log *view* when the OpenVPN pane is focused) |
 | `d` | disconnect active tunnel |
-| `r` | rescan config dirs |
+| `r` | rename selected profile (rescan is automatic) |
 | `i` / `D` | import file / delete profile (confirm) |
 | `/`, `f`, `s` | filter logs / follow toggle / save log to `/tmp` |
 | `?` | help popup |

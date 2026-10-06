@@ -40,7 +40,7 @@ Press `?` in the app for the full table. Essentials:
 | `Tab, 1/2/3` | switch pane focus                               |
 | `Enter/c`  | connect selected (`c` clears the log *view* when the OpenVPN detail pane is focused) |
 | `d`        | disconnect active                                 |
-| `r`        | rescan config dirs                                |
+| `r`        | rename selected profile (rescan is automatic)     |
 | `i`        | import file (path prompt, `Tab` toggles backend)  |
 | `D`        | delete profile (confirm)                          |
 | `/`, `f`, `s` | filter logs / follow toggle / save log to `/tmp` |
@@ -103,9 +103,13 @@ Press `?` in the app for the full table. Essentials:
    Expected (known limitation): logs freeze, UI stays responsive;
    press `d` → `openvpn exited (code signal)…`. No panic, no hang.
 7. **Missing-file badge.** Delete a stored file under
-   `~/.config/tuiblick/` by hand, press `r`. Expect the entry shows
-   `(missing)`; connecting to it gives a clear error, not a panic.
-   Files on disk with no mapping auto-register on rescan.
+   `~/.config/tuiblick/` by hand and wait a few seconds. Expect the
+   entry shows `(missing)` (picked up by the automatic rescan);
+   connecting to it gives a clear error, not a panic.
+   Files on disk with no mapping auto-register the same way.
+7b. **Rename.** Select a profile, press `r`, edit the name, Enter.
+   Expect: the list shows the new display name; the stored file is
+   untouched. Blank names are rejected with an error.
 8. **No network.** Disconnect Wi-Fi (or block `api.ipify.org` +
    `myip.opendns.com`). Expect: `unknown` exit-IP / `n/a` route
    with the reason in the status bar; UI still renders and

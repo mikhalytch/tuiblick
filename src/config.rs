@@ -347,6 +347,26 @@ pub fn delete_profile(id: &str) -> Result<(), AppError> {
     delete_profile_in(&config_root(), id)
 }
 
+fn rename_profile_in(root: &Path, id: &str, new_name: &str) -> Result<(), AppError> {
+    let new_name = new_name.trim();
+    if new_name.is_empty() {
+        return Err(AppError::Config("profile name is empty".to_owned()));
+    }
+    let mut profiles = load_profiles_in(root)?;
+    let profile = profiles
+        .iter_mut()
+        .find(|p| p.id == id)
+        .ok_or_else(|| AppError::Config(format!("profile not found: {id}")))?;
+    profile.display_name = new_name.to_owned();
+    save_profiles_in(root, &profiles)?;
+    Ok(())
+}
+
+/// Rename a profile's display name (stored file untouched).
+pub fn rename_profile(id: &str, new_name: &str) -> Result<(), AppError> {
+    rename_profile_in(&config_root(), id, new_name)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -543,5 +563,36 @@ mod tests {
         assert!(matches!(err, AppError::Config(_)));
         cleanup(&root);
         cleanup(&srcdir);
+    }
+
+    #[test]
+    fn rename_updates_display_name_only() {
+        let root = test_root("rename");
+        let profile = Profile {
+            id: "r1".to_string(),
+            display_name: "old".to_string(),
+            vpn_type: VpnType::Awg,
+            stored_file: "awg/old.conf".to_string(),
+            original_filename: "old.conf".to_string(),
+            created_at: now_rfc3339(),
+        };
+        save_profiles_in(&root, std::slice::from_ref(&profile)).expect("save");
+        rename_profile_in(&root, "r1", "  New Name  ").expect("rename");
+        let back = load_profiles_in(&root).expect("reload");
+        assert_eq!(back.len(), 1);
+        assert_eq!(back[0].display_name, "New Name");
+        assert_eq!(back[0].stored_file, "awg/old.conf");
+        assert_eq!(back[0].original_filename, "old.conf");
+        cleanup(&root);
+    }
+
+    #[test]
+    fn rename_rejects_blank_and_unknown_id() {
+        let root = test_root("rename-err");
+        let err = rename_profile_in(&root, "nope", "x").expect_err("unknown id must fail");
+        assert!(matches!(err, AppError::Config(_)));
+        let err = rename_profile_in(&root, "nope", "   ").expect_err("blank name must fail");
+        assert!(matches!(err, AppError::Config(_)));
+        cleanup(&root);
     }
 }

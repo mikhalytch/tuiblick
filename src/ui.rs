@@ -93,7 +93,7 @@ fn render_profile_list(frame: &mut Frame, app: &App, area: Rect) {
     let focused = app.focus == Focus::List;
     let title = format!(" Profiles ({}) ", app.profiles.len());
     if app.profiles.is_empty() {
-        let body = Paragraph::new("no profiles\n\ni: import  r: rescan")
+        let body = Paragraph::new("no profiles\n\ni: import  r: rename")
             .block(pane_block(&title, focused))
             .wrap(Wrap { trim: false });
         frame.render_widget(body, area);
@@ -160,7 +160,7 @@ fn render_detail(frame: &mut Frame, app: &App, area: Rect) {
     }
     let Some(profile) = app.selected_profile() else {
         let body = Paragraph::new(
-            "No profiles yet.\n\nPress i to import a file,\nr to rescan, ? for help.",
+            "No profiles yet.\n\nPress i to import a file,\nr to rename, ? for help.",
         )
         .block(pane_block(" Detail ", app.focus == Focus::Detail))
         .wrap(Wrap { trim: false });
@@ -394,6 +394,17 @@ fn render_popup(frame: &mut Frame, app: &App, area: Rect) {
             );
             (" Import ", text, 70, 50)
         }
+        Popup::Rename => {
+            let current = app
+                .selected_profile()
+                .map(|p| p.display_name.clone())
+                .unwrap_or_default();
+            let text = format!(
+                "renaming \"{current}\" (display name only, file untouched):\n{}▌\nEnter: rename   Esc: cancel",
+                app.rename_input
+            );
+            (" Rename ", text, 60, 40)
+        }
         Popup::Confirm(kind) => match kind {
             // Wide enough (62 inner cells at 80x24) that the verbatim quit
             // line never wraps mid-sentence.
@@ -535,6 +546,7 @@ mod tests {
             conn_gen: 0,
             import_input: String::new(),
             import_vpn: VpnType::Awg,
+            rename_input: String::new(),
             filter_editing: false,
             filter_input: String::new(),
             log_filter: String::new(),
@@ -612,6 +624,7 @@ mod tests {
             Popup::Help,
             Popup::Sudo,
             Popup::Import,
+            Popup::Rename,
             Popup::Confirm(ConfirmKind::Quit),
             Popup::Confirm(ConfirmKind::Switch { target: 1 }),
             Popup::Confirm(ConfirmKind::Delete {
