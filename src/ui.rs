@@ -246,10 +246,19 @@ fn render_awg_detail(frame: &mut Frame, app: &App, area: Rect, focused: bool, pr
             lines.push(Line::from(raw.to_owned()));
         }
     }
-    let body = Paragraph::new(lines)
-        .block(pane_block(&title, focused))
-        .wrap(Wrap { trim: false });
-    frame.render_widget(body, area);
+    let block = pane_block(&title, focused);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    if inner.width == 0 || inner.height == 0 {
+        return;
+    }
+    // Scrollable like the log view: `awg_scroll` is the top offset
+    // (j/k, PgUp/PgDn on this panel), clamped to the content.
+    let top = app.awg_scroll.min(lines.len().saturating_sub(1));
+    let visible = inner.height as usize;
+    let shown: Vec<Line> = lines.into_iter().skip(top).take(visible.max(1)).collect();
+    let body = Paragraph::new(shown).wrap(Wrap { trim: false });
+    frame.render_widget(body, inner);
 }
 
 /// OpenVPN panel: daemon-warn header, `last exit`, filterable log view.
@@ -571,6 +580,7 @@ mod tests {
             log_filter: String::new(),
             log_follow: true,
             detail_scroll: 0,
+            awg_scroll: 0,
             awg_status: String::new(),
             awg_summary: None,
             awg_poll_inflight: false,
@@ -790,6 +800,30 @@ mod tests {
             awg_rows.iter().max() < ovpn_rows.iter().min(),
             "highlight must follow selection: {awg_rows:?} vs {ovpn_rows:?}"
         );
+    }
+
+    #[test]
+    fn awg_panel_scrolls_with_offset() {
+        let mut app = fixture_app();
+        app.selected = 0;
+        app.focus = Focus::Detail;
+        app.awg_status = (0..30)
+            .map(|i| format!("status line {i:02}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let full = render_text(&app, 80, 24);
+        assert!(
+            full.contains("status line 00"),
+            "head visible without scroll"
+        );
+
+        app.awg_scroll = 20;
+        let scrolled = render_text(&app, 80, 24);
+        assert!(
+            !scrolled.contains("status line 00"),
+            "head must scroll away, got:\n{scrolled}"
+        );
+        assert!(scrolled.contains("status line 29"), "tail reachable");
     }
 
     #[test]

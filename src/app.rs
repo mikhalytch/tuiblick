@@ -200,6 +200,9 @@ pub struct App {
     pub log_filter: String,
     pub log_follow: bool,
     pub detail_scroll: usize,
+    /// Scroll offset of the AWG status panel (per-panel: the OpenVPN log
+    /// view uses `detail_scroll` + `log_follow` instead).
+    pub awg_scroll: usize,
     pub awg_status: String,
     pub awg_summary: Option<AwgSummary>,
     pub awg_poll_inflight: bool,
@@ -243,6 +246,7 @@ impl App {
             log_filter: String::new(),
             log_follow: true,
             detail_scroll: 0,
+            awg_scroll: 0,
             awg_status: String::new(),
             awg_summary: None,
             awg_poll_inflight: false,
@@ -307,10 +311,23 @@ impl App {
         }
     }
 
-    /// Saturating detail-pane scroll (the UI clamps the top edge).
+    /// Saturating detail-pane scroll on the *selected* panel (matches the
+    /// highlight): the AWG status panel moves `awg_scroll`; the OpenVPN log
+    /// view moves `detail_scroll` and any manual scroll drops `log_follow`
+    /// (standard pager behavior — otherwise the keys visibly do nothing
+    /// while follow pins the tail).
     pub fn scroll_detail(&mut self, delta: isize) {
-        let next = (self.detail_scroll as isize + delta).max(0);
-        self.detail_scroll = next as usize;
+        let is_awg = self
+            .selected_profile()
+            .is_some_and(|p| p.vpn_type == VpnType::Awg);
+        if is_awg {
+            let next = (self.awg_scroll as isize + delta).max(0);
+            self.awg_scroll = next as usize;
+        } else {
+            self.log_follow = false;
+            let next = (self.detail_scroll as isize + delta).max(0);
+            self.detail_scroll = next as usize;
+        }
     }
 
     /// Pure connect decision: switch-confirm when the same backend already
@@ -481,7 +498,7 @@ pub fn help_text() -> &'static str {
      /              filter openvpn logs\n\
      f              follow toggle\n\
      s              save openvpn log to /tmp\n\
-     PgUp/PgDn      scroll detail\n\
+     PgUp/PgDn      scroll detail (leaves log-follow)\n\
      ?              this help\n\
      q, Ctrl-C      quit (active tunnel stays up; confirm if active)\n\
      Q              disconnect all tunnels (newest first), then quit\n\
@@ -1873,6 +1890,7 @@ mod tests {
             log_filter: String::new(),
             log_follow: true,
             detail_scroll: 0,
+            awg_scroll: 0,
             awg_status: String::new(),
             awg_summary: None,
             awg_poll_inflight: false,
@@ -2338,7 +2356,8 @@ mod tests {
     }
 
     #[test]
-    fn detail_scroll_saturates() {
+    fn detail_scroll_saturates_per_panel() {
+        // No profiles: falls back to the log-view branch.
         let mut app = empty_app(false);
         app.scroll_detail(-5);
         assert_eq!(app.detail_scroll, 0);
@@ -2346,6 +2365,44 @@ mod tests {
         assert_eq!(app.detail_scroll, 7);
         app.scroll_detail(-3);
         assert_eq!(app.detail_scroll, 4);
+    }
+
+    #[test]
+    fn scroll_on_ovpn_panel_drops_follow() {
+        // The reported bug: with follow on, scroll keys visibly did nothing.
+        // Any manual scroll now drops follow so the keys always move.
+        let mut app = empty_app(true);
+        app.profiles = vec![sample_profile("b", "tunnel", VpnType::OpenVpn)];
+        assert!(app.log_follow);
+        app.scroll_detail(10);
+        assert!(!app.log_follow, "scroll must drop follow");
+        assert_eq!(app.detail_scroll, 10);
+        assert_eq!(app.awg_scroll, 0, "awg offset untouched");
+    }
+
+    #[test]
+    fn scroll_on_awg_panel_uses_awg_offset_only() {
+        let mut app = empty_app(true);
+        app.profiles = vec![sample_profile("a", "office", VpnType::Awg)];
+        app.scroll_detail(5);
+        assert_eq!(app.awg_scroll, 5);
+        assert_eq!(app.detail_scroll, 0, "log offset untouched");
+        assert!(app.log_follow, "follow untouched on the awg panel");
+        app.scroll_detail(-9);
+        assert_eq!(app.awg_scroll, 0);
+    }
+
+    #[test]
+    fn pagedown_key_drops_follow_in_normal_mode() {
+        let mut app = empty_app(true);
+        app.profiles = vec![sample_profile("b", "tunnel", VpnType::OpenVpn)];
+        app.focus = Focus::Detail;
+        assert!(app.log_follow);
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let pgdn = KeyEvent::new(KeyCode::PageDown, KeyModifiers::empty());
+        handle_normal_key(&mut app, &tx, pgdn);
+        assert!(!app.log_follow, "PgDn must drop follow");
+        assert_eq!(app.detail_scroll, PAGE_STEP as usize);
     }
 
     #[test]
