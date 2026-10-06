@@ -152,6 +152,13 @@ pub enum ConfirmEffect {
     Nothing,
 }
 
+/// Terminal action of a tunnel drain: quit the app, or stay open.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DrainMode {
+    Quit,
+    Stay,
+}
+
 /// Outcome of a sudo-auth failure: re-prompt once, then surface an error.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SudoFailure {
@@ -188,10 +195,11 @@ pub struct App {
     pub sudo_cached: Option<bool>,
     pub pending_connect: Option<usize>,
     pub auto_connect: Option<usize>,
-    /// `Q` flow: keep disconnecting (newest tunnel first) until none are
-    /// left, then quit. Set at `Q` start, cleared on quit or disconnect
-    /// failure (which aborts the quit and surfaces the error).
-    pub quit_after_disconnect: bool,
+    /// Drain flow (`Q` quit-all / `D` disconnect-all): newest tunnel first
+    /// until none are left. `Quit` exits at the end, `Stay` reports and
+    /// keeps the app open. Set at flow start, cleared on finish or
+    /// disconnect failure (which aborts the flow and surfaces the error).
+    pub drain: Option<DrainMode>,
     /// `C` flow (connect-all): remaining profile IDs in list order,
     /// non-empty only while a batch is running.
     pub batch_queue: VecDeque<String>,
@@ -249,7 +257,7 @@ impl App {
             sudo_cached: None,
             pending_connect: None,
             auto_connect: None,
-            quit_after_disconnect: false,
+            drain: None,
             batch_queue: VecDeque::new(),
             batch_active: false,
             batch_done: 0,
@@ -531,9 +539,10 @@ pub fn help_text() -> &'static str {
      Enter, c       connect selected (c clears the OpenVPN log view when the detail pane is focused)\n\
      C              connect all in list order (skips busy/missing, stops on error)\n\
      d              disconnect selected profile's tunnel\n\
+     D              disconnect all tunnels (newest first), stay open\n\
      r              rename selected profile (config rescan is automatic)\n\
      i              import file (.ovpn/.conf flips backend, Tab toggles)\n\
-     D              delete profile (confirm)\n\
+     Del,Bksp       delete profile (confirm)\n\
      /              filter openvpn logs\n\
      f              follow toggle (selected panel)\n\
      s              save openvpn log to /tmp\n\
@@ -765,7 +774,8 @@ fn handle_normal_key(app: &mut App, tx: &UnboundedSender<BackendMsg>, key: KeyEv
             }
         }
         KeyCode::Char('d') => do_disconnect(app, tx),
-        KeyCode::Char('D') => open_delete_confirm(app),
+        KeyCode::Char('D') => do_disconnect_all(app, tx),
+        KeyCode::Delete | KeyCode::Backspace => open_delete_confirm(app),
         KeyCode::Char('C') => start_connect_all(app, tx),
         KeyCode::Char('r') => open_rename(app),
         KeyCode::Char('i') => open_import(app),
@@ -1095,20 +1105,31 @@ fn do_quit(app: &mut App) {
 }
 
 /// `Q`: disconnect every live tunnel, newest first, then quit. The chain
-/// runs through the normal down-completions (`quit_all_next`); any
-/// disconnect failure aborts the quit and surfaces the error instead of
-/// silently leaving a tunnel up.
+/// runs through the normal down-completions (`drain_next`); any disconnect
+/// failure aborts the quit and surfaces the error instead of silently
+/// leaving a tunnel up.
 fn do_quit_all(app: &mut App, tx: &UnboundedSender<BackendMsg>) {
-    // A switch in progress is abandoned: its target must not come up
-    // while everything is being brought down. A connect-all batch is
-    // abandoned too: quitting supersedes it.
+    start_drain(app, tx, DrainMode::Quit);
+}
+
+/// `D`: disconnect every live tunnel, newest first, and stay open.
+/// Same chain as `Q` without the exit at the end; pressing either key
+/// during a drain retargets it (last key wins).
+fn do_disconnect_all(app: &mut App, tx: &UnboundedSender<BackendMsg>) {
+    start_drain(app, tx, DrainMode::Stay);
+}
+
+/// Begin (or retarget) a tunnel drain. A switch or connect-all batch in
+/// progress is abandoned: its target must not come up while everything
+/// is being brought down.
+fn start_drain(app: &mut App, tx: &UnboundedSender<BackendMsg>, mode: DrainMode) {
     app.auto_connect = None;
     batch_clear(app);
     match app.phase {
         ConnPhase::Disconnecting => {
             // An op is already in flight; join the flow — its completion
             // continues the chain from the remaining tunnels.
-            app.quit_after_disconnect = true;
+            app.drain = Some(mode);
             set_status(app, "disconnecting all…");
         }
         _ => {
@@ -1119,20 +1140,23 @@ fn do_quit_all(app: &mut App, tx: &UnboundedSender<BackendMsg>) {
                 app.pending_connect = None;
             }
             if app.active.is_empty() {
-                app.quit_after_disconnect = false;
-                app.should_quit = true;
+                app.drain = None;
+                match mode {
+                    DrainMode::Quit => app.should_quit = true,
+                    DrainMode::Stay => set_status(app, "no active tunnels"),
+                }
             } else {
-                app.quit_after_disconnect = true;
-                quit_all_next(app, tx);
+                app.drain = Some(mode);
+                drain_next(app, tx);
             }
         }
     }
 }
 
-/// One Q-flow step: bring down the newest remaining tunnel, or quit when
-/// none are left. Only called with no other transitional operation in
-/// flight, so the kind disconnect always spawns.
-fn quit_all_next(app: &mut App, tx: &UnboundedSender<BackendMsg>) {
+/// One drain step: bring down the newest remaining tunnel, or run the
+/// terminal action when none are left. Only called with no other
+/// transitional operation in flight, so the kind disconnect always spawns.
+fn drain_next(app: &mut App, tx: &UnboundedSender<BackendMsg>) {
     match app.active.last().cloned() {
         Some(newest) => {
             set_status(
@@ -1141,10 +1165,16 @@ fn quit_all_next(app: &mut App, tx: &UnboundedSender<BackendMsg>) {
             );
             do_disconnect_kind(app, tx, newest.kind);
         }
-        None => {
-            app.quit_after_disconnect = false;
-            app.should_quit = true;
-        }
+        None => match app.drain {
+            Some(DrainMode::Quit) => {
+                app.drain = None;
+                app.should_quit = true;
+            }
+            _ => {
+                app.drain = None;
+                set_status(app, "all tunnels disconnected");
+            }
+        },
     }
 }
 
@@ -1159,7 +1189,7 @@ fn start_connect(app: &mut App, tx: &UnboundedSender<BackendMsg>, target: usize)
         show_error(
             app,
             format!(
-                "config file missing: {} — re-import or delete (D)",
+                "config file missing: {} — re-import or delete (Del)",
                 profile.stored_path().display()
             ),
         );
@@ -1797,15 +1827,15 @@ fn complete_awg_down(
                 let action = app.request_connect(target);
                 act_on_connect(app, tx, action);
             }
-            if app.quit_after_disconnect {
-                quit_all_next(app, tx);
+            if app.drain.is_some() {
+                drain_next(app, tx);
             }
         }
         Err(AppError::SudoAuth) => {
             // The down path cannot reuse the connect re-prompt slot, so it
             // surfaces directly; the tunnel stays marked up (honest).
             app.auto_connect = None;
-            app.quit_after_disconnect = false;
+            app.drain = None;
             settle_phase(app);
             show_error(
                 app,
@@ -1814,7 +1844,7 @@ fn complete_awg_down(
         }
         Err(e) => {
             app.auto_connect = None;
-            app.quit_after_disconnect = false;
+            app.drain = None;
             settle_phase(app);
             show_error(
                 app,
@@ -1955,8 +1985,8 @@ fn complete_ovpn_down(
         let action = app.request_connect(target);
         act_on_connect(app, tx, action);
     }
-    if app.quit_after_disconnect {
-        quit_all_next(app, tx);
+    if app.drain.is_some() {
+        drain_next(app, tx);
     }
 }
 
@@ -2095,7 +2125,7 @@ mod tests {
             sudo_cached: None,
             pending_connect: None,
             auto_connect: None,
-            quit_after_disconnect: false,
+            drain: None,
             batch_queue: VecDeque::new(),
             batch_active: false,
             batch_done: 0,
@@ -2283,7 +2313,7 @@ mod tests {
         let (tx, _rx) = mpsc::unbounded_channel();
         do_quit_all(&mut app, &tx);
         assert!(app.should_quit);
-        assert!(!app.quit_after_disconnect);
+        assert_eq!(app.drain, None);
     }
 
     #[test]
@@ -2295,7 +2325,7 @@ mod tests {
         do_quit_all(&mut app, &tx);
         assert!(app.should_quit);
         assert_eq!(app.pending_connect, None);
-        assert!(!app.quit_after_disconnect);
+        assert_eq!(app.drain, None);
     }
 
     #[test]
@@ -2305,17 +2335,17 @@ mod tests {
         let (tx, _rx) = mpsc::unbounded_channel();
         do_quit_all(&mut app, &tx);
         assert!(!app.should_quit, "quit waits for the in-flight disconnect");
-        assert!(app.quit_after_disconnect);
+        assert_eq!(app.drain, Some(DrainMode::Quit));
     }
 
     #[test]
     fn quit_all_chain_ends_when_no_tunnels_left() {
         let mut app = empty_app(false);
-        app.quit_after_disconnect = true;
+        app.drain = Some(DrainMode::Quit);
         let (tx, _rx) = mpsc::unbounded_channel();
-        quit_all_next(&mut app, &tx);
+        drain_next(&mut app, &tx);
         assert!(app.should_quit);
-        assert!(!app.quit_after_disconnect);
+        assert_eq!(app.drain, None);
     }
 
     #[test]
@@ -2323,7 +2353,7 @@ mod tests {
         // A failed down must not silently leave a tunnel up: the quit is
         // aborted and the error is surfaced.
         let mut app = connected_app();
-        app.quit_after_disconnect = true;
+        app.drain = Some(DrainMode::Quit);
         let (tx, _rx) = mpsc::unbounded_channel();
         let gen = app.conn_gen;
         complete_awg_down(
@@ -2334,9 +2364,70 @@ mod tests {
             Err(AppError::User("boom".to_owned())),
         );
         assert!(!app.should_quit);
-        assert!(!app.quit_after_disconnect);
+        assert_eq!(app.drain, None);
         assert!(matches!(app.popup, Popup::Error(_)));
         assert_eq!(app.active.len(), 1, "failed tunnel stays marked up");
+    }
+
+    #[test]
+    fn disconnect_all_with_nothing_up_reports_status() {
+        let mut app = empty_app(false);
+        let (tx, _rx) = mpsc::unbounded_channel();
+        do_disconnect_all(&mut app, &tx);
+        assert!(!app.should_quit, "D never quits");
+        assert_eq!(app.drain, None);
+        assert_eq!(app.status_message, "no active tunnels");
+    }
+
+    #[test]
+    fn disconnect_all_chain_ends_without_quitting() {
+        let mut app = empty_app(false);
+        app.drain = Some(DrainMode::Stay);
+        let (tx, _rx) = mpsc::unbounded_channel();
+        drain_next(&mut app, &tx);
+        assert!(!app.should_quit);
+        assert_eq!(app.drain, None);
+        assert_eq!(app.status_message, "all tunnels disconnected");
+    }
+
+    #[test]
+    fn disconnect_all_joins_inflight_drain() {
+        let mut app = connected_app();
+        app.phase = ConnPhase::Disconnecting;
+        let (tx, _rx) = mpsc::unbounded_channel();
+        do_disconnect_all(&mut app, &tx);
+        assert_eq!(app.drain, Some(DrainMode::Stay));
+        assert!(!app.should_quit);
+    }
+
+    #[test]
+    fn quit_retargets_stay_drain_and_vice_versa() {
+        // Last key wins: either flow can retarget an in-flight drain.
+        let mut app = connected_app();
+        app.phase = ConnPhase::Disconnecting;
+        let (tx, _rx) = mpsc::unbounded_channel();
+        do_disconnect_all(&mut app, &tx);
+        assert_eq!(app.drain, Some(DrainMode::Stay));
+        do_quit_all(&mut app, &tx);
+        assert_eq!(app.drain, Some(DrainMode::Quit));
+        do_disconnect_all(&mut app, &tx);
+        assert_eq!(app.drain, Some(DrainMode::Stay));
+    }
+
+    #[test]
+    fn delete_keys_open_delete_confirm() {
+        let mut app = empty_app(true);
+        app.profiles = vec![sample_profile("a", "office", VpnType::Awg)];
+        let (tx, _rx) = mpsc::unbounded_channel();
+        for code in [KeyCode::Delete, KeyCode::Backspace] {
+            app.popup = Popup::None;
+            let key = KeyEvent::new(code, KeyModifiers::empty());
+            handle_normal_key(&mut app, &tx, key);
+            assert!(
+                matches!(app.popup, Popup::Confirm(ConfirmKind::Delete { .. })),
+                "no delete confirm for {code:?}"
+            );
+        }
     }
 
     #[test]

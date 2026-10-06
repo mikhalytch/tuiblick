@@ -631,7 +631,7 @@ mod tests {
             sudo_cached: None,
             pending_connect: None,
             auto_connect: None,
-            quit_after_disconnect: false,
+            drain: None,
             batch_queue: VecDeque::new(),
             batch_active: false,
             batch_done: 0,

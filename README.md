@@ -38,6 +38,8 @@ Press `?` inside the app for the full key table. Everything below is the short v
 | `Enter` / `c` | connect selected (`c` clears the log *view* when the OpenVPN pane is focused) |
 | `C` | connect all in list order (skips busy/missing, stops on error) |
 | `d` | disconnect selected profile's tunnel |
+| `D` | disconnect all tunnels, newest first (stay open) |
+| `Del`/`Bksp` | delete profile (confirm) |
 | `r` | rename selected profile (rescan is automatic) |
 | `i` / `D` | import file / delete profile (confirm) |
 | `/`, `f`, `s` | filter logs / follow toggle / save log to `/tmp` |

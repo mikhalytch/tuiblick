@@ -173,6 +173,8 @@ Keys (also listed under `?`):
 | `Enter/c` | connect selected                    |
 | `C`       | connect all in list order (skips busy/missing, stops on error) |
 | `d`       | disconnect selected profile's tunnel |
+| `D`       | disconnect all tunnels, newest first (stay open) |
+| `Del/Bksp`| delete profile (confirm)             |
 | `r`       | rename selected profile (rescan is automatic) |
 | `i`       | import file (path prompt)           |
 | `D`       | delete profile (confirm)            |
