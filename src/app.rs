@@ -187,6 +187,10 @@ pub struct App {
     pub sudo_cached: Option<bool>,
     pub pending_connect: Option<usize>,
     pub auto_connect: Option<usize>,
+    /// `Q` flow: keep disconnecting (newest tunnel first) until none are
+    /// left, then quit. Set at `Q` start, cleared on quit or disconnect
+    /// failure (which aborts the quit and surfaces the error).
+    pub quit_after_disconnect: bool,
     pub conn_gen: u64,
     pub import_input: String,
     pub import_vpn: VpnType,
@@ -229,6 +233,7 @@ impl App {
             sudo_cached: None,
             pending_connect: None,
             auto_connect: None,
+            quit_after_disconnect: false,
             conn_gen: 0,
             import_input: String::new(),
             import_vpn: VpnType::Awg,
@@ -478,6 +483,7 @@ pub fn help_text() -> &'static str {
      PgUp/PgDn      scroll detail\n\
      ?              this help\n\
      q, Ctrl-C      quit (active tunnel stays up; confirm if active)\n\
+     Q              disconnect all tunnels (newest first), then quit\n\
      y/N            answer confirm popups   Esc  close popup / cancel input\n\
      sudo password is asked once per session (status: root | sudo cached | sudo needed)"
 }
@@ -709,6 +715,7 @@ fn handle_normal_key(app: &mut App, tx: &UnboundedSender<BackendMsg>, key: KeyEv
         KeyCode::Char('s') => save_log(app),
         KeyCode::Char('?') => app.popup = Popup::Help,
         KeyCode::Char('q') => do_quit(app),
+        KeyCode::Char('Q') => do_quit_all(app, tx),
         KeyCode::Esc => {}
         _ => {}
     }
@@ -865,6 +872,58 @@ fn do_quit(app: &mut App) {
     // Quit never stops the tunnel (spec §7): it stays up after exit.
     if app.request_quit() == QuitAction::ConfirmQuit {
         set_status(app, QUIT_CONFIRM_MSG);
+    }
+}
+
+/// `Q`: disconnect every live tunnel, newest first, then quit. The chain
+/// runs through the normal down-completions (`quit_all_next`); any
+/// disconnect failure aborts the quit and surfaces the error instead of
+/// silently leaving a tunnel up.
+fn do_quit_all(app: &mut App, tx: &UnboundedSender<BackendMsg>) {
+    // A switch in progress is abandoned: its target must not come up
+    // while everything is being brought down.
+    app.auto_connect = None;
+    match app.phase {
+        ConnPhase::Disconnecting => {
+            // An op is already in flight; join the flow — its completion
+            // continues the chain from the remaining tunnels.
+            app.quit_after_disconnect = true;
+            set_status(app, "disconnecting all…");
+        }
+        _ => {
+            if app.phase == ConnPhase::Connecting {
+                // Cancel the in-flight bring-up; a late arrival is cleaned
+                // up by the message handler (brought back down).
+                app.conn_gen = app.conn_gen.wrapping_add(1);
+                app.pending_connect = None;
+            }
+            if app.active.is_empty() {
+                app.quit_after_disconnect = false;
+                app.should_quit = true;
+            } else {
+                app.quit_after_disconnect = true;
+                quit_all_next(app, tx);
+            }
+        }
+    }
+}
+
+/// One Q-flow step: bring down the newest remaining tunnel, or quit when
+/// none are left. Only called with no other transitional operation in
+/// flight, so the kind disconnect always spawns.
+fn quit_all_next(app: &mut App, tx: &UnboundedSender<BackendMsg>) {
+    match app.active.last().cloned() {
+        Some(newest) => {
+            set_status(
+                app,
+                format!("disconnecting {}…", profile_name(app, &newest.profile_id)),
+            );
+            do_disconnect_kind(app, tx, newest.kind);
+        }
+        None => {
+            app.quit_after_disconnect = false;
+            app.should_quit = true;
+        }
     }
 }
 
@@ -1464,11 +1523,15 @@ fn complete_awg_down(
                 let action = app.request_connect(target);
                 act_on_connect(app, tx, action);
             }
+            if app.quit_after_disconnect {
+                quit_all_next(app, tx);
+            }
         }
         Err(AppError::SudoAuth) => {
             // The down path cannot reuse the connect re-prompt slot, so it
             // surfaces directly; the tunnel stays marked up (honest).
             app.auto_connect = None;
+            app.quit_after_disconnect = false;
             settle_phase(app);
             show_error(
                 app,
@@ -1477,6 +1540,7 @@ fn complete_awg_down(
         }
         Err(e) => {
             app.auto_connect = None;
+            app.quit_after_disconnect = false;
             settle_phase(app);
             show_error(
                 app,
@@ -1606,6 +1670,9 @@ fn complete_ovpn_down(
     if let Some(target) = app.auto_connect.take() {
         let action = app.request_connect(target);
         act_on_connect(app, tx, action);
+    }
+    if app.quit_after_disconnect {
+        quit_all_next(app, tx);
     }
 }
 
@@ -1759,6 +1826,7 @@ mod tests {
             sudo_cached: None,
             pending_connect: None,
             auto_connect: None,
+            quit_after_disconnect: false,
             conn_gen: 0,
             import_input: String::new(),
             import_vpn: VpnType::Awg,
@@ -1932,6 +2000,68 @@ mod tests {
         assert_eq!(app.request_quit(), QuitAction::QuitNow);
         assert!(app.should_quit);
         assert_eq!(app.popup, Popup::None);
+    }
+
+    #[test]
+    fn quit_all_with_nothing_up_quits_immediately() {
+        let mut app = empty_app(false);
+        let (tx, _rx) = mpsc::unbounded_channel();
+        do_quit_all(&mut app, &tx);
+        assert!(app.should_quit);
+        assert!(!app.quit_after_disconnect);
+    }
+
+    #[test]
+    fn quit_all_during_connect_cancels_and_quits_when_idle() {
+        let mut app = empty_app(false);
+        app.phase = ConnPhase::Connecting;
+        app.pending_connect = Some(0);
+        let (tx, _rx) = mpsc::unbounded_channel();
+        do_quit_all(&mut app, &tx);
+        assert!(app.should_quit);
+        assert_eq!(app.pending_connect, None);
+        assert!(!app.quit_after_disconnect);
+    }
+
+    #[test]
+    fn quit_all_during_disconnect_joins_the_flow() {
+        let mut app = connected_app();
+        app.phase = ConnPhase::Disconnecting;
+        let (tx, _rx) = mpsc::unbounded_channel();
+        do_quit_all(&mut app, &tx);
+        assert!(!app.should_quit, "quit waits for the in-flight disconnect");
+        assert!(app.quit_after_disconnect);
+    }
+
+    #[test]
+    fn quit_all_chain_ends_when_no_tunnels_left() {
+        let mut app = empty_app(false);
+        app.quit_after_disconnect = true;
+        let (tx, _rx) = mpsc::unbounded_channel();
+        quit_all_next(&mut app, &tx);
+        assert!(app.should_quit);
+        assert!(!app.quit_after_disconnect);
+    }
+
+    #[test]
+    fn quit_all_chain_aborts_on_disconnect_failure() {
+        // A failed down must not silently leave a tunnel up: the quit is
+        // aborted and the error is surfaced.
+        let mut app = connected_app();
+        app.quit_after_disconnect = true;
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let gen = app.conn_gen;
+        complete_awg_down(
+            &mut app,
+            &tx,
+            gen,
+            false,
+            Err(AppError::User("boom".to_owned())),
+        );
+        assert!(!app.should_quit);
+        assert!(!app.quit_after_disconnect);
+        assert!(matches!(app.popup, Popup::Error(_)));
+        assert_eq!(app.active.len(), 1, "failed tunnel stays marked up");
     }
 
     #[test]

@@ -40,7 +40,8 @@ Press `?` inside the app for the full key table. Everything below is the short v
 | `i` / `D` | import file / delete profile (confirm) |
 | `/`, `f`, `s` | filter logs / follow toggle / save log to `/tmp` |
 | `?` | help popup |
-| `q`, Ctrl-C | quit (asks first if a tunnel is active) |
+| `q`, Ctrl-C | quit — tunnels left running (asks first if any is up) |
+| `Q` | disconnect every tunnel, newest first, then quit |
 | `y/N`, Esc | answer / dismiss popups (Enter means No — the safe choice) |
 
 ## What it does NOT do

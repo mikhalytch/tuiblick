@@ -561,6 +561,7 @@ mod tests {
             sudo_cached: None,
             pending_connect: None,
             auto_connect: None,
+            quit_after_disconnect: false,
             conn_gen: 0,
             import_input: String::new(),
             import_vpn: VpnType::Awg,

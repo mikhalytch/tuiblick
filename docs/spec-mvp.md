@@ -175,7 +175,8 @@ Keys (also listed under `?`):
 | `f`       | toggle log follow                   |
 | `s`       | save openvpn log to /tmp            |
 | `?`       | help popup                          |
-| `q`,Ctrl-C| disconnect? no — just quit (confirm if active) |
+| `q`,Ctrl-C| disconnect? no — just quit (confirm if any tunnel is up) |
+| `Q`       | disconnect every tunnel, newest first, then quit |
 
 States: `Profiles | Connecting | Connected | Disconnecting | ErrorPopup |
 HelpPopup | SudoPrompt | ImportPrompt | RenamePrompt | ConfirmPopup`. All backend

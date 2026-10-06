@@ -45,7 +45,8 @@ Press `?` in the app for the full table. Essentials:
 | `D`        | delete profile (confirm)                          |
 | `/`, `f`, `s` | filter logs / follow toggle / save log to `/tmp` |
 | `?`        | help popup                                        |
-| `q`, Ctrl-C | quit (confirm if a tunnel is active)             |
+| `q`, Ctrl-C | quit — tunnels left running (confirm if any is up) |
+| `Q` | disconnect every tunnel, newest first, then quit          |
 
 ## Notes you must know
 
@@ -93,6 +94,8 @@ Press `?` in the app for the full table. Essentials:
    vertically — AWG status over OpenVPN logs — and the selected
    profile's panel gets the highlighted border. Connecting while the
    same backend is up prompts to switch (old tunnel stops first).
+   `Q` brings everything down (newest tunnel first) and exits;
+   a failed disconnect aborts the quit and shows the error.
 3. **Sudo prompt appears once.** Fresh session, non-root, no cached
    password: first connect opens the masked prompt once. Type a
    **wrong** password → re-prompt with an error note (exactly one
