@@ -1,7 +1,7 @@
 //! Profiles directory, `profiles.yaml` mapping, and import/delete.
 //!
-//! Spec §2 layout under [`tuiblick_dir()`] (`~/.config/tuiblick`):
-//! `awg/<sanitized>.conf`, `openvpn/<sanitized>.<ovpn|conf>`, plus a
+//! Layout under [`tuiblick_dir()`] (`~/Library/Application Support/tuiblick` on macOS):
+//! `awg/awgN.conf`, `openvpn/<sanitized>.<ovpn|conf>`, plus a
 //! `profiles.yaml` list mapping display names to stored files.
 //!
 //! The public API works against the real config root. The private
@@ -89,7 +89,7 @@ impl Profile {
     }
 }
 
-/// Config root: `$TUIBLICK_CONFIG_DIR` override, else `~/.config/tuiblick`.
+/// Config root: `$TUIBLICK_CONFIG_DIR` override, else the platform config directory plus `tuiblick`.
 fn config_root() -> PathBuf {
     if let Ok(dir) = std::env::var("TUIBLICK_CONFIG_DIR") {
         if !dir.trim().is_empty() {
@@ -101,7 +101,7 @@ fn config_root() -> PathBuf {
         .unwrap_or_else(|| std::env::temp_dir().join("tuiblick"))
 }
 
-/// Absolute config directory (`~/.config/tuiblick` on macOS).
+/// Absolute config directory (`~/Library/Application Support/tuiblick` on macOS).
 /// Spec Task 2 interface; the app entry points use `scan_and_reconcile` /
 /// `import_file` / `delete_profile`, so this stays for API completeness.
 #[allow(dead_code)]

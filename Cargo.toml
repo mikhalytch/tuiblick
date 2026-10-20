@@ -2,6 +2,9 @@
 name = "tuiblick"
 version = "0.1.0"
 edition = "2021"
+license = "0BSD"
+description = "macOS terminal UI for AmneziaWG and OpenVPN connections"
+repository = "https://github.com/mikhalytch/tuiblick"
 
 [dependencies]
 ratatui = "0.29"

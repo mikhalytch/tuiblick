@@ -17,15 +17,17 @@ No shell is ever invoked — backend commands run as argv arrays.
 
 ## Config root
 
-`~/.config/tuiblick/` (override for tests only: `TUIBLICK_CONFIG_DIR`):
+`~/Library/Application Support/tuiblick/` on macOS
+(override for tests only: `TUIBLICK_CONFIG_DIR`):
 
 ```text
-~/.config/tuiblick/
-  awg/<sanitized>.conf
+~/Library/Application Support/tuiblick/
+  awg/awgN.conf
   openvpn/<sanitized>.ovpn
   profiles.yaml
 ```
 
+AWG files use short interface-safe names such as `awg0.conf`. For OpenVPN,
 `sanitize(name)`: lowercase, `[^a-z0-9-_]` → `-`, collapse dashes,
 trim, fallback `profile`, dedupe with `-2`, `-3`. The original
 filename is kept verbatim in `profiles.yaml` (`original_filename`).
@@ -46,7 +48,6 @@ Press `?` in the app for the full table. Essentials:
 | `Del/Bksp` | delete profile (confirm)                        |
 | `r`        | rename selected profile (rescan is automatic)     |
 | `i`        | import file (path prompt, `Tab` toggles backend)  |
-| `D`        | delete profile (confirm)                          |
 | `/`, `f`, `s` | filter logs / follow toggle / save log to `/tmp` |
 | `?`        | help popup                                        |
 | `q`, Ctrl-C | quit — tunnels left running (confirm if any is up) |
@@ -120,7 +121,7 @@ Press `?` in the app for the full table. Essentials:
    Expected (known limitation): logs freeze, UI stays responsive;
    press `d` → `openvpn exited (code signal)…`. No panic, no hang.
 7. **Missing-file badge.** Delete a stored file under
-   `~/.config/tuiblick/` by hand and wait a few seconds. Expect the
+   `~/Library/Application Support/tuiblick/` by hand and wait a few seconds. Expect the
    entry shows `(missing)` (picked up by the automatic rescan);
    connecting to it gives a clear error, not a panic.
    Files on disk with no mapping auto-register the same way.

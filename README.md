@@ -8,9 +8,15 @@ You keep VPN configs scattered across downloads folders and connect with copy-pa
 
 You need macOS (Terminal.app, iTerm2, or tmux, at least 80×24), Rust stable, and the backends you plan to use (`awg-quick` / `awg`, `openvpn`).
 
+For an AmneziaWG backend with the macOS DNS notification fix, see
+[`amneziawg-mac`](https://github.com/mikhalytch/amneziawg-mac).
+Install the backends separately and make them available on your `PATH`.
+
 ```sh
-cargo build
-./target/debug/tuiblick
+git clone https://github.com/mikhalytch/tuiblick.git
+cd tuiblick
+cargo install --path . --locked
+tuiblick
 ```
 
 Press `?` inside the app for the full key table. Everything below is the short version.
@@ -29,7 +35,7 @@ Or via just: `just build` / `just install` (`~/.cargo/bin/tuiblick`).
 
 ## What it does
 
-- **Profile list** — import `.conf` / `.ovpn` files (`i`), even with spaces, parentheses, or unicode in the name. Files live under `~/.config/tuiblick/` (`awg/`, `openvpn/`, plus a `profiles.yaml` mapping). Rescan with `r`; entries whose file vanished show as `(missing)` instead of breaking.
+- **Profile list** — import `.conf` / `.ovpn` files (`i`), even with spaces, parentheses, or unicode in the name. Files live under `~/Library/Application Support/tuiblick/` on macOS (`awg/`, `openvpn/`, plus a `profiles.yaml` mapping). The list rescans automatically every 5 seconds; entries whose file vanished show as `(missing)` instead of breaking.
 - **One tunnel per backend** — one AWG and one OpenVPN tunnel may be up
   together. `Enter` connects, `d` disconnects the selected profile's
   tunnel. Connecting while the same backend is up asks you to switch
@@ -53,7 +59,7 @@ Or via just: `just build` / `just install` (`~/.cargo/bin/tuiblick`).
 | `D` | disconnect all tunnels, newest first (stay open) |
 | `Del`/`Bksp` | delete profile (confirm) |
 | `r` | rename selected profile (rescan is automatic) |
-| `i` / `D` | import file / delete profile (confirm) |
+| `i` | import file |
 | `/`, `f`, `s` | filter logs / follow toggle / save log to `/tmp` |
 | `?` | help popup |
 | `q`, Ctrl-C | quit — tunnels left running (asks first if any is up) |
@@ -74,3 +80,9 @@ Deliberately, in this version:
 
 - [`docs/manual.md`](docs/manual.md) — setup, config layout, and the 10-step manual test checklist
 - [`docs/spec-mvp.md`](docs/spec-mvp.md) — the full MVP spec this was built against
+
+## License
+
+[0BSD](LICENSE) (BSD Zero Clause): you may use, modify, and redistribute
+tuiblick, including in proprietary software, without a copyleft requirement.
+Dependencies and external VPN backends retain their own licenses.
