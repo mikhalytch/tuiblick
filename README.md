@@ -21,6 +21,22 @@ tuiblick
 
 Press `?` inside the app for the full key table. Everything below is the short version.
 
+## Configuration directory
+
+`XDG_CONFIG_HOME` is the standard base directory for user configuration.
+tuiblick stores profiles in `$XDG_CONFIG_HOME/tuiblick/`. If the variable is
+unset, empty, or relative, tuiblick uses `~/.config/tuiblick/` on macOS too.
+See the [XDG Base Directory Specification](https://specifications.freedesktop.org/basedir/0.8/).
+
+To choose a different base directory for one run:
+
+```sh
+XDG_CONFIG_HOME="$HOME/my-config" tuiblick
+```
+
+For existing profiles from an earlier build, see the
+[migration notes](docs/manual.md#existing-profiles).
+
 ## CLI flags
 
 ```sh
@@ -35,7 +51,7 @@ Or via just: `just build` / `just install` (`~/.cargo/bin/tuiblick`).
 
 ## What it does
 
-- **Profile list** — import `.conf` / `.ovpn` files (`i`), even with spaces, parentheses, or unicode in the name. Files live under `~/Library/Application Support/tuiblick/` on macOS (`awg/`, `openvpn/`, plus a `profiles.yaml` mapping). The list rescans automatically every 5 seconds; entries whose file vanished show as `(missing)` instead of breaking.
+- **Profile list** — import `.conf` / `.ovpn` files (`i`), even with spaces, parentheses, or unicode in the name. Files live under `$XDG_CONFIG_HOME/tuiblick/` (default `~/.config/tuiblick/`, including on macOS) (`awg/`, `openvpn/`, plus a `profiles.yaml` mapping). The list rescans automatically every 5 seconds; entries whose file vanished show as `(missing)` instead of breaking.
 - **One tunnel per backend** — one AWG and one OpenVPN tunnel may be up
   together. `Enter` connects, `d` disconnects the selected profile's
   tunnel. Connecting while the same backend is up asks you to switch

@@ -1,14 +1,14 @@
 //! Profiles directory, `profiles.yaml` mapping, and import/delete.
 //!
-//! Layout under [`tuiblick_dir()`] (`~/Library/Application Support/tuiblick` on macOS):
+//! Layout under [`tuiblick_dir()`] (`$XDG_CONFIG_HOME/tuiblick`, default `~/.config/tuiblick`):
 //! `awg/awgN.conf`, `openvpn/<sanitized>.<ovpn|conf>`, plus a
 //! `profiles.yaml` list mapping display names to stored files.
 //!
 //! The public API works against the real config root. The private
 //! `*_in(root)` variants take an explicit root so unit tests can use
 //! unique temp dirs under `std::env::temp_dir()` (std-only, no
-//! `tempfile` dev-dependency). `TUIBLICK_CONFIG_DIR` overrides the root,
-//! reserved for future integration tests — never set in production.
+//! `tempfile` dev-dependency). Config and app tests serialize temporary
+//! changes to `XDG_CONFIG_HOME` using one shared lock.
 
 use std::collections::HashSet;
 use std::fs;
@@ -89,19 +89,17 @@ impl Profile {
     }
 }
 
-/// Config root: `$TUIBLICK_CONFIG_DIR` override, else the platform config directory plus `tuiblick`.
+/// XDG config root on every platform: ignore empty or relative base paths.
 fn config_root() -> PathBuf {
-    if let Ok(dir) = std::env::var("TUIBLICK_CONFIG_DIR") {
-        if !dir.trim().is_empty() {
-            return PathBuf::from(dir);
-        }
-    }
-    dirs::config_dir()
-        .map(|d| d.join("tuiblick"))
-        .unwrap_or_else(|| std::env::temp_dir().join("tuiblick"))
+    std::env::var_os("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .filter(|dir| dir.is_absolute())
+        .or_else(|| dirs::home_dir().map(|home| home.join(".config")))
+        .unwrap_or_else(std::env::temp_dir)
+        .join("tuiblick")
 }
 
-/// Absolute config directory (`~/Library/Application Support/tuiblick` on macOS).
+/// Absolute config directory: `$XDG_CONFIG_HOME/tuiblick`, default `~/.config/tuiblick`.
 /// Spec Task 2 interface; the app entry points use `scan_and_reconcile` /
 /// `import_file` / `delete_profile`, so this stays for API completeness.
 #[allow(dead_code)]
@@ -421,6 +419,10 @@ pub fn rename_profile(id: &str, new_name: &str) -> Result<(), AppError> {
     rename_profile_in(&config_root(), id, new_name)
 }
 
+// Serialize config-environment changes across config and app tests.
+#[cfg(test)]
+pub(crate) static CONFIG_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -449,6 +451,76 @@ mod tests {
             fs::create_dir_all(parent).expect("create parent dirs");
         }
         fs::write(path, contents).expect("write fixture file");
+    }
+
+    struct XdgConfigHome {
+        old: Option<std::ffi::OsString>,
+        _lock: std::sync::MutexGuard<'static, ()>,
+    }
+
+    impl XdgConfigHome {
+        fn set(value: Option<&std::ffi::OsStr>) -> Self {
+            let lock = CONFIG_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+            let old = std::env::var_os("XDG_CONFIG_HOME");
+            match value {
+                Some(value) => std::env::set_var("XDG_CONFIG_HOME", value),
+                None => std::env::remove_var("XDG_CONFIG_HOME"),
+            }
+            Self { old, _lock: lock }
+        }
+    }
+
+    impl Drop for XdgConfigHome {
+        fn drop(&mut self) {
+            match &self.old {
+                Some(value) => std::env::set_var("XDG_CONFIG_HOME", value),
+                None => std::env::remove_var("XDG_CONFIG_HOME"),
+            }
+        }
+    }
+
+    /// Create a temporary XDG base with spaces and a source profile, import it
+    /// through the public API, and check that config files and metadata live
+    /// inside the tuiblick subdirectory and can be loaded and deleted there.
+    #[test]
+    fn xdg_config_home_contains_profiles_and_metadata() {
+        let base = test_root("xdg base with spaces");
+        let _env = XdgConfigHome::set(Some(base.as_os_str()));
+        let root = base.join("tuiblick");
+        assert_eq!(tuiblick_dir(), root);
+
+        let src = base.join("source.ovpn");
+        write_file(&src, "client");
+        let profile = import_file(&src, VpnType::OpenVpn).expect("import into XDG root");
+        assert_eq!(profile.stored_path(), root.join(&profile.stored_file));
+        assert!(!profile.is_missing());
+        assert!(root.join("profiles.yaml").is_file());
+        assert!(!base.join("profiles.yaml").exists());
+        assert_eq!(load_profiles().unwrap(), vec![profile.clone()]);
+        delete_profile(&profile.id).expect("delete from XDG root");
+        assert!(profile.is_missing());
+        assert!(load_profiles().unwrap().is_empty());
+        cleanup(&base);
+    }
+
+    /// Unset XDG_CONFIG_HOME temporarily, resolve the config directory without
+    /// writing files, and check the XDG default under the current user's home.
+    #[test]
+    fn xdg_config_home_unset_defaults_to_home_config() {
+        let _env = XdgConfigHome::set(None);
+        let home = dirs::home_dir().expect("test user has a home directory");
+        assert_eq!(tuiblick_dir(), home.join(".config/tuiblick"));
+    }
+
+    /// Supply empty and relative XDG values without writing files, and check
+    /// that each invalid value falls back to the home config directory.
+    #[test]
+    fn xdg_config_home_ignores_empty_and_relative_values() {
+        let home = dirs::home_dir().expect("test user has a home directory");
+        for value in ["", "relative/config", "~/.config", " "] {
+            let _env = XdgConfigHome::set(Some(std::ffi::OsStr::new(value)));
+            assert_eq!(tuiblick_dir(), home.join(".config/tuiblick"), "{value:?}");
+        }
     }
 
     #[test]

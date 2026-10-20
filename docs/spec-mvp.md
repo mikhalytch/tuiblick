@@ -43,8 +43,12 @@ Each source file lands as its own reviewable git commit.
 
 ## 2. Configuration directory
 
+Use `$XDG_CONFIG_HOME/tuiblick/`, defaulting to `~/.config/tuiblick/`
+when the variable is unset, empty, or relative, including on macOS.
+`XDG_CONFIG_HOME` must be an absolute base directory.
+
 ```text
-~/.config/tuiblick/
+$XDG_CONFIG_HOME/tuiblick/
   awg/<sanitized>.conf
   openvpn/<sanitized>.ovpn
   profiles.yaml
@@ -56,7 +60,7 @@ Each source file lands as its own reviewable git commit.
 - id: ulid-or-uuid-string
   display_name: "my-office"        # UI name, defaults to original file stem
   vpn_type: awg | openvpn
-  stored_file: "awg/my-office.conf"  # relative to ~/.config/tuiblick
+  stored_file: "awg/my-office.conf"  # relative to $XDG_CONFIG_HOME/tuiblick
   original_filename: "My Office (1).conf"  # arbitrary user filename, kept verbatim
   created_at: "2026-10-06T12:00:00Z"
 ```
@@ -95,7 +99,7 @@ Rules:
 ## 4. AmneziaWG (`awg.rs`)
 
 - Up: `awg-quick up <full-stored-path>` (e.g.
-  `~/.config/tuiblick/awg/my-office.conf`). Full path is required:
+  `$XDG_CONFIG_HOME/tuiblick/awg/my-office.conf`). Full path is required:
   bare `up <iface>` only searches `/etc/amnezia/...` and
   `/usr/local/etc/...`. Interface name is derived from the file stem.
 - Down: `awg-quick down <full-stored-path>` (same path form; works

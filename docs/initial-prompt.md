@@ -48,7 +48,9 @@ Avoid adding dependencies unnecessarily.
 
 ## Configuration directory
 
-Use this directory:
+Use `$XDG_CONFIG_HOME/APP_NAME/`. If `XDG_CONFIG_HOME` is unset, empty,
+or relative, default to `~/.config/APP_NAME/`, including on macOS.
+The variable must contain an absolute base directory.
 
 ```text
-~/.config/APP\_NAME/
+$XDG_CONFIG_HOME/APP_NAME/

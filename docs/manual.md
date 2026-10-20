@@ -17,11 +17,14 @@ No shell is ever invoked — backend commands run as argv arrays.
 
 ## Config root
 
-`~/Library/Application Support/tuiblick/` on macOS
-(override for tests only: `TUIBLICK_CONFIG_DIR`):
+tuiblick uses `$XDG_CONFIG_HOME/tuiblick/` on every platform, including macOS.
+`XDG_CONFIG_HOME` must be an absolute base directory, without the `tuiblick`
+suffix. If it is unset, empty, or relative, the base defaults to `~/.config/`.
+The old app-specific config override is no longer used.
+See the [XDG Base Directory Specification](https://specifications.freedesktop.org/basedir/0.8/).
 
 ```text
-~/Library/Application Support/tuiblick/
+$XDG_CONFIG_HOME/tuiblick/
   awg/awgN.conf
   openvpn/<sanitized>.ovpn
   profiles.yaml
@@ -31,6 +34,21 @@ AWG files use short interface-safe names such as `awg0.conf`. For OpenVPN,
 `sanitize(name)`: lowercase, `[^a-z0-9-_]` → `-`, collapse dashes,
 trim, fallback `profile`, dedupe with `-2`, `-3`. The original
 filename is kept verbatim in `profiles.yaml` (`original_filename`).
+
+## Existing profiles
+
+Earlier macOS builds used `~/Library/Application Support/tuiblick/`.
+The new default is `~/.config/tuiblick/`; existing files are not moved
+or imported automatically. You can import profiles into the new directory
+with `i`, or keep using the old directory by setting its parent as the base:
+
+```sh
+XDG_CONFIG_HOME="$HOME/Library/Application Support" tuiblick
+```
+
+This setting applies to that invocation only. Existing VPN connections
+keep running; stop a connection with the build and profile directory that
+started it before testing connections from a different directory.
 
 ## Keys
 
@@ -121,7 +139,8 @@ Press `?` in the app for the full table. Essentials:
    Expected (known limitation): logs freeze, UI stays responsive;
    press `d` → `openvpn exited (code signal)…`. No panic, no hang.
 7. **Missing-file badge.** Delete a stored file under
-   `~/Library/Application Support/tuiblick/` by hand and wait a few seconds. Expect the
+   `$XDG_CONFIG_HOME/tuiblick/` (default `~/.config/tuiblick/`) by hand
+   and wait a few seconds. Expect the
    entry shows `(missing)` (picked up by the automatic rescan);
    connecting to it gives a clear error, not a panic.
    Files on disk with no mapping auto-register the same way.

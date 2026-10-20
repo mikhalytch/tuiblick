@@ -14,7 +14,7 @@
 
 - macOS only; Apple Silicon + Intel; Rust stable; works in Terminal.app, iTerm2, tmux; 80x24 minimum.
 - No Vortix, Tunnelblick, standard WireGuard tools, GUI, daemon, persistent connection state, auto-reconnect, launch-at-login.
-- Config root is `~/.config/tuiblick/` with `awg/`, `openvpn/`, `profiles.yaml`; no shell invocation (argv arrays only).
+- Config root is `$XDG_CONFIG_HOME/tuiblick/` (default `~/.config/tuiblick/` when unset, empty, or relative, including macOS) with `awg/`, `openvpn/`, `profiles.yaml`; no shell invocation (argv arrays only).
 - `cargo fmt --check`, `cargo clippy -- -D warnings`, `cargo test` must pass on every task.
 - One tunnel active at a time; quit leaves tunnel up (explicit `d` to stop).
 - Sudo password in memory only, zeroized on quit/auth-failure; never on disk.
@@ -62,9 +62,9 @@
   - `config::sanitize_filename(stem:&str) -> String`
   - `config::tuiblick_dir() -> PathBuf`, `config::load_profiles() -> Result<Vec<Profile>,AppError>`, `config::save_profiles(&[Profile]) -> Result<(),AppError>`, `config::scan_and_reconcile() -> Result<Vec<Profile>,AppError>`, `config::import_file(src:&Path, vpn:VpnType) -> Result<Profile,AppError>`, `config::delete_profile(id:&str) -> Result<(),AppError>`
 
-- [ ] **Step 1: Write failing tests** — `sanitize_lowercases_and_dashes("My Office (1)") == "my-office-1"`; `scan` with orphan file auto-registers; `import` keeps `original_filename`; missing-file entry flagged (test via tempdir `TUlicblick` override or injectable root param)
+- [ ] **Step 1: Write failing tests** — `sanitize_lowercases_and_dashes("My Office (1)") == "my-office-1"`; `scan` with orphan file auto-registers; `import` keeps `original_filename`; missing-file entry flagged (test via a temporary `XDG_CONFIG_HOME` base or an injectable root parameter)
 - [ ] **Step 2: Run to verify fail** — Run: `cargo test config::` Expected: FAIL (module missing)
-- [ ] **Step 3: Implement `src/config.rs`** — `tuiblick_dir()` via `dirs::config_dir()/tuiblick`; sanitize: lowercase, `[^a-z0-9-_]`→`-`, collapse, trim `-`, fallback `profile`; reconcile: read yaml (missing file → empty), walk `awg/*.conf` + `openvpn/*.{ovpn,conf}`, dedupe `-2/-3`; import copies file; delete removes file+mapping
+- [ ] **Step 3: Implement `src/config.rs`** — `tuiblick_dir()` via absolute `$XDG_CONFIG_HOME/tuiblick` or `dirs::home_dir()/.config/tuiblick` when unset, empty, or relative; sanitize: lowercase, `[^a-z0-9-_]`→`-`, collapse, trim `-`, fallback `profile`; reconcile: read yaml (missing file → empty), walk `awg/*.conf` + `openvpn/*.{ovpn,conf}`, dedupe `-2/-3`; import copies file; delete removes file+mapping
 - [ ] **Step 4: Verify pass** — Run: `cargo test config:: && cargo clippy -- -D warnings` Expected: PASS
 - [ ] **Step 5: Commit** — `git add src/config.rs && git commit -m "feat: config scan, import mapping and sanitize"`
 

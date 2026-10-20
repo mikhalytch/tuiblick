@@ -2491,29 +2491,28 @@ mod tests {
     /// on drop, even on panic). Seed `files` (config-relative paths) so
     /// `is_missing()` answers are deterministic.
     ///
-    /// All users share one process-wide lock: `TUIBLICK_CONFIG_DIR` is
-    /// process-global, so parallel tests must not point it at different
-    /// dirs at once (last-writer-wins reads = flakes).
-    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
+    /// Share the config module's process-wide lock: `XDG_CONFIG_HOME` is
+    /// process-global, so config and app tests must not change it concurrently.
     struct TempConfig {
-        old: Option<String>,
+        old: Option<std::ffi::OsString>,
         dir: std::path::PathBuf,
         _env_lock: std::sync::MutexGuard<'static, ()>,
     }
     impl TempConfig {
         fn fresh(tag: &str, files: &[&str]) -> Self {
-            let env_lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+            let env_lock = config::CONFIG_ENV_LOCK
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
             let dir =
                 std::env::temp_dir().join(format!("tuiblick-test-{tag}-{}", std::process::id()));
             let _ = std::fs::remove_dir_all(&dir);
             for f in files {
-                let path = dir.join(f);
+                let path = dir.join("tuiblick").join(f);
                 std::fs::create_dir_all(path.parent().unwrap()).unwrap();
                 std::fs::write(&path, "fixture").unwrap();
             }
-            let old = std::env::var("TUIBLICK_CONFIG_DIR").ok();
-            std::env::set_var("TUIBLICK_CONFIG_DIR", &dir);
+            let old = std::env::var_os("XDG_CONFIG_HOME");
+            std::env::set_var("XDG_CONFIG_HOME", &dir);
             Self {
                 old,
                 dir,
@@ -2524,8 +2523,8 @@ mod tests {
     impl Drop for TempConfig {
         fn drop(&mut self) {
             match &self.old {
-                Some(v) => std::env::set_var("TUIBLICK_CONFIG_DIR", v),
-                None => std::env::remove_var("TUIBLICK_CONFIG_DIR"),
+                Some(v) => std::env::set_var("XDG_CONFIG_HOME", v),
+                None => std::env::remove_var("XDG_CONFIG_HOME"),
             }
             let _ = std::fs::remove_dir_all(&self.dir);
         }
