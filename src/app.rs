@@ -592,7 +592,7 @@ enum BackendMsg {
     OvpnSpawn {
         gen: u64,
         profile_id: String,
-        result: Result<OpenVpnSession, AppError>,
+        result: Box<Result<OpenVpnSession, AppError>>,
     },
     OvpnDown {
         gen: u64,
@@ -1248,7 +1248,7 @@ fn start_connect(app: &mut App, tx: &UnboundedSender<BackendMsg>, target: usize)
                 let _ = task_tx.send(BackendMsg::OvpnSpawn {
                     gen,
                     profile_id,
-                    result,
+                    result: Box::new(result),
                 });
             });
         }
@@ -1720,7 +1720,7 @@ fn handle_backend_msg(app: &mut App, tx: &UnboundedSender<BackendMsg>, msg: Back
             gen,
             profile_id,
             result,
-        } => complete_ovpn_spawn(app, tx, gen, profile_id, result),
+        } => complete_ovpn_spawn(app, tx, gen, profile_id, *result),
         BackendMsg::OvpnDown {
             gen,
             cleanup,
@@ -1997,8 +1997,9 @@ fn complete_ovpn_down(
 }
 
 /// 3 s AWG poll, and ONLY while an AWG tunnel is up (spec §4).
-/// Polls the whole `awg show` dump (the live interface is a
-/// system-assigned utunN, not the config stem). Overlap is guarded by
+/// Polls the whole `awg show` dump (the live interface name is platform
+/// specific — system-assigned utunN on macOS, the config file stem on
+/// Linux — so no interface argument is ever passed). Overlap is guarded by
 /// `awg_poll_inflight`.
 fn maybe_poll_awg(app: &mut App, tx: &UnboundedSender<BackendMsg>) {
     if app.phase != ConnPhase::Connected || app.awg_poll_inflight {
