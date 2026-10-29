@@ -1,8 +1,8 @@
 //! AmneziaWG backend: up/down/show (spec §4).
 //!
 //! - Up: `awg-quick up <full-stored-path>`; down mirrors it. The full path
-//!   is required (bare `up <iface>` only searches `/etc/amnezia/...` and
-//!   `/usr/local/etc/...`) and travels as ONE argv element — paths with
+//!   is required (bare `up <iface>` only searches `/etc/amnezia/amneziawg/`
+//!   on Linux and `/etc/amnezia/...` / `/usr/local/etc/...` on macOS) and travels as ONE argv element — paths with
 //!   spaces/unicode are never shell-split (argv arrays only, no shell).
 //! - Status: `awg show <iface>` returns the raw text; [`parse_summary`]
 //!   derives a best-effort [`AwgSummary`] (peer count, latest handshake,
@@ -63,6 +63,8 @@ pub async fn down(runner: &SudoRunner, conf_path: &Path) -> Result<String, AppEr
 /// Deliberately no interface argument: on macOS the live interface is a
 /// system-assigned `utunN` name (e.g. `interface: utun4`), not the config
 /// file stem, so `awg show <stem>` fails with "Unable to access interface".
+/// (On Linux the live interface is the config file stem, e.g. `awg0`, but
+/// the bare dump covers both platforms with one code path.)
 /// Same error contract as [`up`].
 pub async fn show(runner: &SudoRunner) -> Result<String, AppError> {
     let (prog, argv) = show_command();
@@ -528,6 +530,36 @@ peer: dM4ZrplmGMkCzwo9R5g8BBO3EMtaFzxHP2GOE7tYXR0=
         );
         assert_eq!(s.rx.as_deref(), Some("5.14 MiB"));
         assert_eq!(s.tx.as_deref(), Some("9.17 MiB"));
+    }
+
+    #[test]
+    fn parse_summary_on_linux_awg_dump() {
+        // Linux `awg show` shape: the live interface is the config file
+        // stem (awgN from the stored awgN.conf name), same peer fields.
+        let raw = "\
+interface: awg0
+  public key: abc1234567890=
+  private key: (hidden)
+  listening port: 51820
+
+peer: def4567890abc=
+  endpoint: 203.0.113.7:51820
+  allowed ips: 0.0.0.0/0
+  latest handshake: 2 minutes, 10 seconds ago
+  transfer: 3.44 MiB received, 1.02 MiB sent
+  persistent keepalive: every 25 seconds
+";
+        let s = parse_summary(raw);
+        assert_eq!(s.peers, 1, "got {s:?}");
+        assert_eq!(
+            s.latest_handshake.as_deref(),
+            Some("2 minutes, 10 seconds ago")
+        );
+        assert_eq!(s.rx.as_deref(), Some("3.44 MiB"));
+        assert_eq!(s.tx.as_deref(), Some("1.02 MiB"));
+        let (iface, peers) = split_sections(raw);
+        assert!(iface.iter().any(|l| l.contains("interface: awg0")));
+        assert!(peers.iter().any(|l| l.starts_with("peer:")));
     }
 
     #[test]

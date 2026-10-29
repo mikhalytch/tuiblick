@@ -2,14 +2,24 @@
 
 ## 0. Overview
 
-`tuiblick` is a small native macOS terminal UI (Rust stable) for managing
-AmneziaWG (`awg-quick` / `awg`) and OpenVPN (`openvpn`) connections.
+`tuiblick` is a small native terminal UI (Rust stable) for managing
+AmneziaWG (`awg-quick` / `awg`) and OpenVPN (`openvpn`) connections on
+macOS and Linux.
 
 - No Vortix, Tunnelblick, standard WireGuard tools, GUI, daemon,
   persistent connection state, profiles DB beyond import mapping,
   auto-reconnect, or launch-at-login in MVP.
-- Must work in Terminal.app, iTerm2, tmux. 80x24 minimum.
+- Must work in Terminal.app, iTerm2, tmux (macOS) and any
+  xterm-compatible terminal or tmux (Linux). 80x24 minimum.
 - App name is `tuiblick` (placeholder `APP_NAME` is gone).
+- Platform differences are isolated per module: route probing (`net.rs`;
+  `route -n get` on macOS, `ip route` on Linux, each with the other's
+  commands as a last-resort fallback), live interface names (`awg.rs`;
+  `utunN` on macOS, config file stem on Linux), backend install paths and
+  DNS handling (docs only — the argv-level commands are identical).
+- Backend support by platform: AmneziaWG is supported on macOS and Linux;
+  OpenVPN is supported on macOS (`openvpn.rs` is unchanged; OpenVPN is not
+  checked on Linux so far).
 
 ## 1. Crate layout
 
@@ -94,21 +104,24 @@ Rules:
 - Status bar shows `root | sudo cached | sudo needed`.
 - Probe at startup: `sudo -n true` → cached vs needed (non-blocking).
 - `awg-quick`, `awg`, and `openvpn` always go through `SudoRunner`
-  (both need tun/tap + routes on macOS).
+  (both need tun/tap + routes).
 
 ## 4. AmneziaWG (`awg.rs`)
 
 - Up: `awg-quick up <full-stored-path>` (e.g.
   `$XDG_CONFIG_HOME/tuiblick/awg/my-office.conf`). Full path is required:
-  bare `up <iface>` only searches `/etc/amnezia/...` and
-  `/usr/local/etc/...`. Interface name is derived from the file stem.
+  bare `up <iface>` only searches `/etc/amnezia/amneziawg/` on Linux and
+  `/etc/amnezia/...` / `/usr/local/etc/...` on macOS. Interface name is
+  derived from the file stem (on Linux the live interface IS the stem,
+  e.g. `awg0`; on macOS it is a system-assigned `utunN`).
 - Down: `awg-quick down <full-stored-path>` (same path form; works
   for both CONFIG_FILE and INTERFACE forms of `awg-quick`).
 - Both short-lived via `tokio::process::Command`, combined output
   captured, last output kept for the status pane, errors surfaced.
 - Status (only for the active AWG profile, every 3 s):
-  `awg show` (whole dump, raw text shown — the live interface is a
-  system-assigned `utunN`, not the config stem) + best-effort parse of
+  `awg show` (whole dump, raw text shown — the live interface name is
+  platform-specific: system-assigned `utunN` on macOS, the config file
+  stem such as `awg0` on Linux) + best-effort parse of
   `latest handshake`, `transfer rx/tx`, peer count. Parse failures
   never fail the poll — raw text is the source of truth.
 - At most one tunnel per backend in MVP (one AWG + one OpenVPN may be up
@@ -142,14 +155,20 @@ Captured values:
   (`last_exit_ip: Option<String>`); shown in that tunnel's panel.
   Never persisted to disk in MVP.
 
-How (macOS, no heavy deps):
+How (no heavy deps):
 
-- Default route: `route -n get default` → parse `gateway:` +
-  `interface:`. Fallback: `route -n get 1.1.1.1`. Failure → `n/a`,
-  never blocks.
+- Default route, native pair first, then the other platform's pair as a
+  last resort (one shared runner, `None` on any single failure):
+  macOS `route -n get default` → parse `gateway:` + `interface:`,
+  fallback `route -n get 1.1.1.1`; Linux `ip route show default` →
+  parse `via <gateway>` + `dev <iface>` on the first `default` line,
+  fallback `ip route get 1.1.1.1` (a tunnel reply without a `via` hop
+  parses as `None`). All failing → `n/a`, never blocks.
 - Public/exit IP: `curl -s --max-time 5 https://api.ipify.org`
   via `tokio::process` (no reqwest/TLS in tree). Fallback:
-  `dig +short +time=3 +tries=1 myip.opendns.com @208.67.222.222`.
+  `dig +short +time=3 +tries=1 myip.opendns.com @208.67.222.222`
+  (`dig` is optional — `bind` / `dnsutils` / `bind-tools` package; a box
+  without it simply reports `unknown` when `curl` fails).
   Timeout total ≤ 8 s, runs in background task, UI shows
   `resolving…` meanwhile. Failure → `unknown`, with reason in
   status bar. No IP fetch ever blocks input rendering.
@@ -209,10 +228,15 @@ line; popup shows full chain. `anyhow` only at `main` boundary.
 - Unit tests (no root, no real sudo/vpn):
   filename sanitize + dedupe, mapping load/save round-trip,
   log ring cap + filter, sudo argv construction, `route` output
-  parser, ipify/dig output trimmer.
+  parser (macOS shape) + `ip route` output parsers (Linux shapes,
+  including the via-less tunnel reply), ipify/dig output trimmer.
 - Manual checklist (in `docs/manual.md`): import awg + ovpn with
   weird names, connect/disconnect each, sudo prompt once, kill -9
-  openvpn path, missing-file badge, tmux + Terminal.app smoke.
+  openvpn path, missing-file badge, tmux + terminal smoke (Terminal.app
+  on macOS, native terminal on Linux; OpenVPN items are checked on macOS —
+  not checked on Linux so far, and Linux support in this round is AmneziaWG-only).
+- Linux verification commands (in `docs/linux-verify.md`): dump route,
+  IP-probe, and backend outputs to `/tmp` files for inspection.
 
 ## 10. Non-goals (MVP)
 

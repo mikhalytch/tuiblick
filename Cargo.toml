@@ -3,7 +3,7 @@ name = "tuiblick"
 version = "0.1.0"
 edition = "2021"
 license = "0BSD"
-description = "macOS terminal UI for AmneziaWG and OpenVPN connections"
+description = "terminal UI for AmneziaWG and OpenVPN connections (macOS and Linux)"
 repository = "https://github.com/mikhalytch/tuiblick"
 
 [dependencies]

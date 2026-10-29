@@ -1,16 +1,41 @@
 # tuiblick
 
-> A tiny macOS terminal UI for your AmneziaWG and OpenVPN connections. One binary, no daemons, no GUI — just your tunnels in one place.
+> A tiny terminal UI for your AmneziaWG and OpenVPN connections. One binary, no daemons, no GUI — just your tunnels in one place.
 
 You keep VPN configs scattered across downloads folders and connect with copy-pasted terminal commands. tuiblick gives you a single keyboard-driven screen to import those files, bring tunnels up and down, watch OpenVPN logs live, and see your exit IP change.
 
+## Platform support
+
+The macOS → Linux migration is done **for AmneziaWG only, for now**:
+
+- **macOS**: AmneziaWG and OpenVPN, both fully supported.
+- **Linux**: AmneziaWG only. OpenVPN code is unchanged and OpenVPN is
+  not checked on Linux so far.
+
 ## Quick start
 
-You need macOS (Terminal.app, iTerm2, or tmux, at least 80×24), Rust stable, and the backends you plan to use (`awg-quick` / `awg`, `openvpn`).
+You need a terminal (at least 80×24 — Terminal.app, iTerm2, or tmux on
+macOS; any xterm-compatible terminal or tmux on Linux), Rust stable, and
+the backends you plan to use.
 
-For an AmneziaWG backend with the macOS DNS notification fix, see
-[`amneziawg-mac`](https://github.com/mikhalytch/amneziawg-mac).
-Install the backends separately and make them available on your `PATH`.
+- macOS: AmneziaWG (`awg-quick` / `awg`) and OpenVPN (`openvpn`) are both
+  supported. Install the backends separately and make them available on
+  your `PATH`. For an AmneziaWG backend with the macOS DNS notification
+  fix, see [`amneziawg-mac`](https://github.com/mikhalytch/amneziawg-mac)
+  (macOS only).
+- Linux: **AmneziaWG only** in this round — `openvpn.rs` is unchanged and
+  OpenVPN is not checked on Linux so far. You need `awg-quick` / `awg`, plus `curl` for exit-IP probing and
+  `iproute2` for route probing (usually preinstalled). `dig` enables the
+  optional OpenDNS fallback probe (`bind` on Arch/Manjaro, `dnsutils` on
+  Debian/Ubuntu, `bind-utils` on Fedora — without it a failed `curl`
+  probe simply reports `unknown`). AmneziaWG tools are not in every
+  distro's default repos — on Arch/Manjaro install `amneziawg-tools`
+  from the AUR, elsewhere follow the
+  [AmneziaWG releases](https://github.com/amnezia-vpn/amneziawg-tools).
+  `awg-quick` applies `DNS =` lines via `resolvconf`, so install a
+  provider (`openresolv` on Arch/Manjaro) and see the DNS pitfalls in
+  `docs/manual.md` — configs with a `DNS =` line fail at connect
+  without it.
 
 ```sh
 git clone https://github.com/mikhalytch/tuiblick.git
@@ -25,7 +50,8 @@ Press `?` inside the app for the full key table. Everything below is the short v
 
 `XDG_CONFIG_HOME` is the standard base directory for user configuration.
 tuiblick stores profiles in `$XDG_CONFIG_HOME/tuiblick/`. If the variable is
-unset, empty, or relative, tuiblick uses `~/.config/tuiblick/` on macOS too.
+unset, empty, or relative, tuiblick uses `~/.config/tuiblick/` on every
+platform, macOS included.
 See the [XDG Base Directory Specification](https://specifications.freedesktop.org/basedir/0.8/).
 
 To choose a different base directory for one run:
@@ -51,15 +77,15 @@ Or via just: `just build` / `just install` (`~/.cargo/bin/tuiblick`).
 
 ## What it does
 
-- **Profile list** — import `.conf` / `.ovpn` files (`i`), even with spaces, parentheses, or unicode in the name. Files live under `$XDG_CONFIG_HOME/tuiblick/` (default `~/.config/tuiblick/`, including on macOS) (`awg/`, `openvpn/`, plus a `profiles.yaml` mapping). The list rescans automatically every 5 seconds; entries whose file vanished show as `(missing)` instead of breaking.
+- **Profile list** — import `.conf` / `.ovpn` files (`i`), even with spaces, parentheses, or unicode in the name. Files live under `$XDG_CONFIG_HOME/tuiblick/` (default `~/.config/tuiblick/` on every platform) (`awg/`, `openvpn/`, plus a `profiles.yaml` mapping). The list rescans automatically every 5 seconds; entries whose file vanished show as `(missing)` instead of breaking.
 - **One tunnel per backend** — one AWG and one OpenVPN tunnel may be up
   together. `Enter` connects, `d` disconnects the selected profile's
   tunnel. Connecting while the same backend is up asks you to switch
   first. Quitting never kills your tunnels (it asks, then leaves them
   up — stopping is always explicit).
-- **AmneziaWG status** — the right pane shows `awg show` output plus a summary: peer count, latest handshake, transfer rx/tx, refreshed every 3 s while connected.
-- **OpenVPN logs, live** — timestamped log view with follow toggle (`f`), scrolling (`j/k`, PgUp/PgDn), substring filter (`/`), view clear (`c`), and save to `/tmp` (`s`). If your `.ovpn` contains a `daemon` directive, tuiblick warns you and stays in the foreground so logs keep flowing.
-- **Exit-IP header** — always visible: `init <ip> (<gateway>/<iface>) → exit <ip>`, plus a per-tunnel last exit IP. Probes run in the background and never block the UI; when offline you get `unknown` / `n/a`, not a hang.
+- **AmneziaWG status** — the right pane shows `awg show` output plus a summary: peer count, latest handshake, transfer rx/tx, refreshed every 3 s while connected. The live interface is platform-specific (`utunN` on macOS, the config file stem such as `awg0` on Linux) — tuiblick always polls the bare dump, so both work.
+- **OpenVPN logs, live** (OpenVPN is not checked on Linux so far) — timestamped log view with follow toggle (`f`), scrolling (`j/k`, PgUp/PgDn), substring filter (`/`), view clear (`c`), and save to `/tmp` (`s`). If your `.ovpn` contains a `daemon` directive, tuiblick warns you and stays in the foreground so logs keep flowing.
+- **Exit-IP header** — always visible: `init <ip> (<gateway>/<iface>) → exit <ip>`, plus a per-tunnel last exit IP. The default route comes from `route -n get` on macOS and `ip route` on Linux (each with the other platform's commands as a last-resort fallback); the exit IP comes from `curl` (ipify) with a `dig` (OpenDNS) fallback (`dig` is optional — without it a failed `curl` simply reports `unknown`). Probes run in the background and never block the UI; when offline you get `unknown` / `n/a`, not a hang.
 - **Sudo, asked once** — the first connect that needs privilege opens one masked password prompt per session. The password lives in memory only and is zeroized on quit or auth failure. Run the whole TUI as root and it never prompts at all.
 
 ## Shortcuts
@@ -95,6 +121,7 @@ Deliberately, in this version:
 ## Docs
 
 - [`docs/manual.md`](docs/manual.md) — setup, config layout, and the 10-step manual test checklist
+- [`docs/linux-verify.md`](docs/linux-verify.md) — Linux verification commands (dump probe outputs to `/tmp` for inspection)
 - [`docs/spec-mvp.md`](docs/spec-mvp.md) — the full MVP spec this was built against
 
 ## License
