@@ -192,6 +192,16 @@ pub fn split_sections(raw: &str) -> (Vec<String>, Vec<String>) {
     (iface, peers)
 }
 
+/// True when a backend-failure tail reports an already-existing interface
+/// (e.g. ``awg-quick: `awg0' already exists``): the tunnel is up outside
+/// this session — quit leaves tunnels up by design, so after a reopen the
+/// runtime state is clean while the interface lingers. The backend is
+/// busy, not broken: callers skip instead of failing. ASCII
+/// case-insensitive substring match; empty tails never match.
+pub fn is_already_exists_tail(tail: &str) -> bool {
+    tail.to_ascii_lowercase().contains("already exists")
+}
+
 /// Byte-wise ASCII case-insensitive substring search. The returned index
 /// always starts at an ASCII byte (a non-ASCII byte can never equal an
 /// ASCII needle byte), so it is a valid `str` slicing boundary.
@@ -560,6 +570,35 @@ peer: def4567890abc=
         let (iface, peers) = split_sections(raw);
         assert!(iface.iter().any(|l| l.contains("interface: awg0")));
         assert!(peers.iter().any(|l| l.starts_with("peer:")));
+    }
+
+    #[test]
+    fn already_exists_tail_detected() {
+        // Verbatim tail from a lingering-interface collision (quit-leaves-up
+        // + reopen, Manjaro 2026-10-30): warning line, then the backend line.
+        assert!(is_already_exists_tail(
+            "Warning: `/root/.config/tuiblick/awg/awg0.conf' is world accessible\nawg-quick: `awg0' already exists\n"
+        ));
+        assert!(is_already_exists_tail("awg-quick: `awg0' already exists"));
+        assert!(is_already_exists_tail("WG-QUICK: `WG0' ALREADY EXISTS"));
+    }
+
+    #[test]
+    fn already_exists_tail_rejects_other_failures() {
+        for tail in [
+            "",
+            "\n",
+            "boom",
+            "No such device",
+            "RTNETLINK answers: File exists",
+            "already",
+            "exists",
+        ] {
+            assert!(
+                !is_already_exists_tail(tail),
+                "tail {tail:?} must not match"
+            );
+        }
     }
 
     #[test]
