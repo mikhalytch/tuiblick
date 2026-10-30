@@ -77,6 +77,11 @@ pub struct ActiveConn {
     pub kind: VpnType,
     pub started_at: String,
     pub last_exit_ip: Option<String>,
+    /// True when the tunnel was already up before this session (startup
+    /// adoption of a lingering interface) rather than started here. The
+    /// UI badges it; everything else (poll, `d`, batch skip, exit IP)
+    /// treats it like any active tunnel.
+    pub adopted: bool,
 }
 
 /// Connection phase: spec states `Profiles | Connecting | Connected |
@@ -589,6 +594,7 @@ enum BackendMsg {
         gen: u64,
         result: Result<String, AppError>,
     },
+    AdoptAwg(Result<String, AppError>),
     OvpnSpawn {
         gen: u64,
         profile_id: String,
@@ -627,6 +633,19 @@ pub async fn run(connect_all: bool) -> anyhow::Result<()> {
             let _ = tx.send(BackendMsg::SudoProbe(probe_cached()));
         });
     }
+    // Lingering-tunnel adoption (Linux, AWG only): quit leaves tunnels up,
+    // so a reopen may find live interfaces with a clean runtime state.
+    // Attempted only when passwordless (root / stored / cached) — the scan
+    // never prompts just to look.
+    {
+        let tx = btx.clone();
+        let sudo = Arc::clone(&app.sudo);
+        tokio::spawn(async move {
+            if let Some(result) = try_adopt_show(&sudo).await {
+                let _ = tx.send(BackendMsg::AdoptAwg(result));
+            }
+        });
+    }
     spawn_initial_probes(&btx);
 
     let mut terminal =
@@ -661,6 +680,34 @@ pub async fn run(connect_all: bool) -> anyhow::Result<()> {
     // Password lives in memory only: zeroize on quit (spec §3).
     app.sudo.clear();
     Ok(())
+}
+
+/// Passwordless `awg show` for startup adoption (Linux only): `Some` when
+/// the check can run without prompting (root, stored password, or cached
+/// sudo timestamp), `None` when it would need a prompt. The timestamp
+/// probe is synchronous by design, so it runs on the blocking pool like
+/// the startup sudo-cache probe.
+#[cfg(target_os = "linux")]
+async fn try_adopt_show(sudo: &SudoRunner) -> Option<Result<String, AppError>> {
+    if sudo.is_root() || sudo.has_password() {
+        return Some(crate::awg::show(sudo).await);
+    }
+    let cached = tokio::task::spawn_blocking(probe_cached)
+        .await
+        .unwrap_or(false);
+    if cached {
+        Some(crate::awg::show(sudo).await)
+    } else {
+        None
+    }
+}
+
+/// Passwordless `awg show` for startup adoption: always `None` off Linux,
+/// where live interface names cannot map to profiles (`utunN` is
+/// system-assigned, not the config stem).
+#[cfg(not(target_os = "linux"))]
+async fn try_adopt_show(_sudo: &SudoRunner) -> Option<Result<String, AppError>> {
+    None
 }
 
 /// Dedicated event thread: blocking `poll`/`read`, forwarded over `tx`.
@@ -980,6 +1027,65 @@ fn batch_queue_for(app: &App) -> VecDeque<String> {
         .filter(|p| !app.is_profile_active(&p.id))
         .map(|p| p.id.clone())
         .collect()
+}
+
+/// True when a bring-up failure means the interface is already up outside
+/// this session (quit-leaves-up + reopen): only `Process` errors carrying
+/// the backend's "already exists" tail count — auth, I/O, and any other
+/// backend failure stay fatal to the batch.
+fn is_lingering_interface(e: &AppError) -> bool {
+    match e {
+        AppError::Process { tail, .. } => crate::awg::is_already_exists_tail(tail),
+        _ => false,
+    }
+}
+
+/// Config-file stem of an AWG profile (`awg/awg0.conf` → `awg0`): on Linux
+/// the live interface IS this stem, which is what makes attribution exact.
+/// `None` for non-UTF8 paths (never adopted, never panics).
+fn awg_interface_stem(profile: &Profile) -> Option<&str> {
+    std::path::Path::new(&profile.stored_file)
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+}
+
+/// Adopt one lingering AWG tunnel into runtime state (startup adoption).
+/// Matches live interface names against AWG profile stored stems in list
+/// order and adopts the first match — at most one tunnel per backend —
+/// unless that backend is already active. Seeds phase, status dump, and
+/// summary from the adoption dump so the panel and the 3 s poll work at
+/// once; the caller resamples routes/exit IP. Failures and empty matches
+/// are silent (`None`): nothing was found, nothing changes. Pure over the
+/// app state (no spawning) so unit tests pin the mapping directly.
+fn adopt_lingering_awg(app: &mut App, result: Result<String, AppError>) -> Option<String> {
+    let raw = result.ok()?;
+    if app.active_of_kind(VpnType::Awg).is_some() {
+        return None;
+    }
+    let interfaces = crate::awg::parse_interface_names(&raw);
+    let profile = app.profiles.iter().find(|p| {
+        p.vpn_type == VpnType::Awg
+            && interfaces
+                .iter()
+                .any(|name| Some(name.as_str()) == awg_interface_stem(p))
+    })?;
+    let id = profile.id.clone();
+    let name = profile.display_name.clone();
+    app.active.push(ActiveConn {
+        profile_id: id.clone(),
+        kind: VpnType::Awg,
+        started_at: "unknown (adopted)".to_owned(),
+        last_exit_ip: None,
+        adopted: true,
+    });
+    app.phase = ConnPhase::Connected;
+    app.awg_status = raw;
+    app.awg_summary = Some(crate::awg::parse_summary(&app.awg_status));
+    set_status(
+        app,
+        format!("adopted lingering tunnel {name} (started outside this session)"),
+    );
+    Some(id)
 }
 
 /// One batch step: pop items until one spawns/pauses the batch, or the
@@ -1716,6 +1822,13 @@ fn handle_backend_msg(app: &mut App, tx: &UnboundedSender<BackendMsg>, msg: Back
             result,
         } => complete_awg_down(app, tx, gen, cleanup, result),
         BackendMsg::AwgPoll { gen, result } => complete_awg_poll(app, gen, result),
+        BackendMsg::AdoptAwg(result) => {
+            if let Some(id) = adopt_lingering_awg(app, result) {
+                let gen = app.conn_gen;
+                spawn_current_resample(tx, gen);
+                spawn_exit_ip(tx, gen, id);
+            }
+        }
         BackendMsg::OvpnSpawn {
             gen,
             profile_id,
@@ -1774,6 +1887,7 @@ fn complete_awg_up(
                 kind: VpnType::Awg,
                 started_at: now_rfc3339(),
                 last_exit_ip: None,
+                adopted: false,
             });
             app.awg_status = output;
             app.awg_summary = Some(crate::awg::parse_summary(&app.awg_status));
@@ -1797,8 +1911,18 @@ fn complete_awg_up(
             app.pending_connect = None;
             if app.batch_active {
                 let failed = profile_name(app, &profile_id);
-                batch_clear(app);
-                show_error(app, format!("connect-all stopped at {failed}: {e}"));
+                if is_lingering_interface(&e) {
+                    // Quit leaves tunnels up by design, so after a reopen
+                    // the runtime state is clean while the interface
+                    // lingers: `awg-quick up` answers "already exists".
+                    // That is a busy backend, not a failure — skip like a
+                    // runtime-known busy backend and keep the batch going.
+                    app.batch_skipped += 1;
+                    batch_next(app, tx);
+                } else {
+                    batch_clear(app);
+                    show_error(app, format!("connect-all stopped at {failed}: {e}"));
+                }
             } else {
                 show_error(app, format!("connect failed: {e}"));
             }
@@ -1919,6 +2043,7 @@ fn complete_ovpn_spawn(
                 kind: VpnType::OpenVpn,
                 started_at: now_rfc3339(),
                 last_exit_ip: None,
+                adopted: false,
             });
             if app.ovpn_daemon_warn {
                 set_status(
@@ -2190,6 +2315,7 @@ mod tests {
             kind: VpnType::Awg,
             started_at: "2026-10-06T12:00:00Z".to_owned(),
             last_exit_ip: None,
+            adopted: false,
         }];
         app
     }
@@ -2226,6 +2352,7 @@ mod tests {
             kind: VpnType::OpenVpn,
             started_at: "2026-10-06T12:00:00Z".to_owned(),
             last_exit_ip: None,
+            adopted: false,
         });
         assert_eq!(app.request_quit(), QuitAction::ConfirmQuit);
         assert_eq!(app.popup, Popup::Confirm(ConfirmKind::Quit));
@@ -2697,6 +2824,108 @@ mod tests {
     }
 
     #[test]
+    fn adopt_matches_stored_stem_in_list_order() {
+        let mut app = empty_app(true);
+        app.profiles = vec![
+            sample_profile("a", "office", VpnType::Awg),
+            sample_profile("b", "tunnel", VpnType::OpenVpn),
+            sample_profile("c", "branch", VpnType::Awg),
+        ];
+        let raw = "interface: branch\n  listening port: 51820\n\npeer: aaa=\n  endpoint: 1.1.1.1\n";
+        assert_eq!(
+            adopt_lingering_awg(&mut app, Ok(raw.to_owned())),
+            Some("c".to_owned())
+        );
+        assert_eq!(app.phase, ConnPhase::Connected);
+        assert_eq!(app.active.len(), 1);
+        assert_eq!(app.active[0].profile_id, "c");
+        assert!(app.active[0].adopted, "badge must distinguish adoption");
+        assert!(app.awg_summary.is_some(), "panel seeds from the dump");
+        assert!(
+            app.status_message
+                .contains("adopted lingering tunnel branch"),
+            "got {}",
+            app.status_message
+        );
+    }
+
+    #[test]
+    fn adopt_ignores_non_awg_and_active_backend() {
+        // OpenVPN stems never match (AWG-only adoption).
+        let mut app = empty_app(true);
+        app.profiles = vec![sample_profile("b", "tunnel", VpnType::OpenVpn)];
+        assert_eq!(
+            adopt_lingering_awg(&mut app, Ok("interface: tunnel\n".to_owned())),
+            None
+        );
+        assert_eq!(app.phase, ConnPhase::Idle);
+        assert!(app.active.is_empty());
+
+        // An already-active AWG backend blocks a second adoption: at most
+        // one tunnel per backend.
+        let mut app = connected_app();
+        assert_eq!(
+            adopt_lingering_awg(&mut app, Ok("interface: office\n".to_owned())),
+            None
+        );
+        assert_eq!(app.active.len(), 1);
+        assert!(!app.active[0].adopted);
+    }
+
+    #[test]
+    fn adopt_failure_and_empty_dump_are_silent() {
+        let mut app = empty_app(true);
+        app.profiles = vec![sample_profile("a", "office", VpnType::Awg)];
+        assert_eq!(
+            adopt_lingering_awg(&mut app, Err(AppError::User("boom".to_owned()))),
+            None
+        );
+        assert_eq!(adopt_lingering_awg(&mut app, Ok(String::new())), None);
+        // macOS shape: utun names never equal a stored stem — no match.
+        assert_eq!(
+            adopt_lingering_awg(&mut app, Ok("interface: utun4\n".to_owned())),
+            None
+        );
+        assert_eq!(app.phase, ConnPhase::Idle);
+        assert!(app.active.is_empty());
+        assert!(app.status_message.is_empty());
+    }
+
+    #[test]
+    fn lingering_interface_skips_batch_without_popup() {
+        // Quit-leaves-up + reopen: runtime state is clean but awg0 lingers,
+        // so `awg-quick up` answers "already exists". Busy, not fatal —
+        // the batch skips and drains instead of stopping with an error.
+        let mut app = empty_app(true);
+        app.profiles = vec![sample_profile("a", "office", VpnType::Awg)];
+        app.phase = ConnPhase::Connecting;
+        app.batch_active = true;
+        app.batch_queue = VecDeque::from(["ghost".to_owned()]);
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let gen = app.conn_gen;
+        complete_awg_up(
+            &mut app,
+            &tx,
+            gen,
+            "a".to_owned(),
+            Err(AppError::Process {
+                cmd: "awg-quick up /root/.config/tuiblick/awg/awg0.conf".to_owned(),
+                code: Some(1),
+                tail: "Warning: `/root/.config/tuiblick/awg/awg0.conf' is world accessible\nawg-quick: `awg0' already exists".to_owned(),
+            }),
+        );
+        assert!(
+            matches!(app.popup, Popup::None),
+            "skip must not raise an error popup"
+        );
+        assert!(!app.batch_active, "drained queue finishes the batch");
+        assert_eq!(
+            app.status_message,
+            "connect-all finished: 0 connected, 1 skipped"
+        );
+    }
+
+    #[test]
     fn ovpn_spawn_failure_aborts_batch() {
         let mut app = empty_app(true);
         app.profiles = vec![sample_profile("b", "tunnel", VpnType::OpenVpn)];
@@ -2764,6 +2993,7 @@ mod tests {
                 kind,
                 started_at: "2026-10-06T12:00:00Z".to_owned(),
                 last_exit_ip: None,
+                adopted: false,
             });
         }
         let (tx, _rx) = mpsc::unbounded_channel();
@@ -2784,6 +3014,7 @@ mod tests {
             kind: VpnType::OpenVpn,
             started_at: "2026-10-06T12:00:00Z".to_owned(),
             last_exit_ip: None,
+            adopted: false,
         });
         let (tx, _rx) = mpsc::unbounded_channel();
         start_connect_all(&mut app, &tx);

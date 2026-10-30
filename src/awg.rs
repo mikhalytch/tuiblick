@@ -65,10 +65,15 @@ pub async fn down(runner: &SudoRunner, conf_path: &Path) -> Result<String, AppEr
 /// file stem, so `awg show <stem>` fails with "Unable to access interface".
 /// (On Linux the live interface is the config file stem, e.g. `awg0`, but
 /// the bare dump covers both platforms with one code path.)
-/// Same error contract as [`up`].
+///
+/// Unlike [`up`]/[`down`], the success text is NEVER tail-capped: the
+/// dump's head carries the `interface:` lines (startup adoption, panel
+/// columns), and large configs (e.g. long Amnezia `i1` hex lines) push the
+/// dump past 2 KB — capping would decapitate it. Same error contract as
+/// [`up`] otherwise.
 pub async fn show(runner: &SudoRunner) -> Result<String, AppError> {
     let (prog, argv) = show_command();
-    run_backend(runner, &prog, argv).await
+    run_backend_full(runner, &prog, argv).await
 }
 
 /// Best-effort [`AwgSummary`] of raw `awg show` text. Never fails, never
@@ -192,6 +197,42 @@ pub fn split_sections(raw: &str) -> (Vec<String>, Vec<String>) {
     (iface, peers)
 }
 
+/// True when a backend-failure tail reports an already-existing interface
+/// (e.g. ``awg-quick: `awg0' already exists``): the tunnel is up outside
+/// this session — quit leaves tunnels up by design, so after a reopen the
+/// runtime state is clean while the interface lingers. The backend is
+/// busy, not broken: callers skip instead of failing. ASCII
+/// case-insensitive substring match; empty tails never match.
+pub fn is_already_exists_tail(tail: &str) -> bool {
+    tail.to_ascii_lowercase().contains("already exists")
+}
+
+/// Live interface names from raw `awg show` text: values of column-0
+/// `interface:` lines (ASCII case-insensitive key), trimmed, in dump
+/// order. Used by startup adoption (Linux: the name IS the config file
+/// stem, e.g. `interface: awg0` for stored `awg/awg0.conf`). Indented
+/// lines are field rows, never names; unknown/garbage input yields an
+/// empty vec — never an error.
+pub fn parse_interface_names(raw: &str) -> Vec<String> {
+    let mut names = Vec::new();
+    for line in raw.lines() {
+        if line.starts_with(' ') || line.starts_with('\t') {
+            continue;
+        }
+        let Some(colon) = line.find(':') else {
+            continue;
+        };
+        if !line[..colon].trim().eq_ignore_ascii_case("interface") {
+            continue;
+        }
+        let value = line[colon + 1..].trim();
+        if !value.is_empty() {
+            names.push(value.to_owned());
+        }
+    }
+    names
+}
+
 /// Byte-wise ASCII case-insensitive substring search. The returned index
 /// always starts at an ASCII byte (a non-ASCII byte can never equal an
 /// ASCII needle byte), so it is a valid `str` slicing boundary.
@@ -216,6 +257,32 @@ async fn run_backend(
     let args: Vec<&str> = argv.iter().map(String::as_str).collect();
     match runner.run(prog, &args).await {
         Ok(output) => finish_output(&cmd, output),
+        Err(err) => Err(remap_process_cmd(&cmd, err)),
+    }
+}
+
+/// Uncapped variant of [`run_backend`] for [`show`]: same `SudoAuth` /
+/// backend-form `Process` contract, but success text keeps the whole dump
+/// (see [`show`]).
+async fn run_backend_full(
+    runner: &SudoRunner,
+    prog: &str,
+    argv: Vec<String>,
+) -> Result<String, AppError> {
+    let cmd = backend_display(prog, &argv);
+    let args: Vec<&str> = argv.iter().map(String::as_str).collect();
+    match runner.run(prog, &args).await {
+        Ok(output) => {
+            if output.status.success() {
+                Ok(success_text_full(&output))
+            } else {
+                Err(AppError::Process {
+                    cmd,
+                    code: output.status.code(),
+                    tail: tail_2k(&combined_text(&output)),
+                })
+            }
+        }
         Err(err) => Err(remap_process_cmd(&cmd, err)),
     }
 }
@@ -290,6 +357,13 @@ pub(crate) fn remap_process_cmd(backend_cmd: &str, err: AppError) -> AppError {
 /// Combined stdout+stderr success text: trimmed, last 2 KB if huge.
 pub(crate) fn success_text(output: &Output) -> String {
     tail_2k(combined_text(output).trim())
+}
+
+/// Combined stdout+stderr success text: trimmed, never capped. For
+/// [`show`]: `interface:` lines live at the dump's head and large configs
+/// exceed 2 KB, so capping would lose them.
+pub(crate) fn success_text_full(output: &Output) -> String {
+    combined_text(output).trim().to_owned()
 }
 
 /// Concatenated stdout+stderr as lossy text.
@@ -438,6 +512,24 @@ peer: def4567890abc=
     }
 
     #[test]
+    fn full_success_text_keeps_head_of_big_dump() {
+        // Regression: the adoption scan received a 2048-byte tail starting
+        // mid-`i1` hex with the `interface:` head cut off. `show` must keep
+        // the whole dump — head lines carry interface names.
+        let head = "interface: awg0\n  listening port: 40734\n";
+        let filler = "x".repeat(5000);
+        let out = success_text_full(&ok_output(&format!("{head}{filler}\npeer: aaa=\n"), ""));
+        assert!(
+            out.starts_with("interface: awg0"),
+            "head lost: {:?}",
+            &out[..40.min(out.len())]
+        );
+        assert!(out.ends_with("peer: aaa="), "tail lost");
+        assert!(out.len() > 2048, "must not be capped");
+        assert_eq!(out, out.trim(), "still trimmed");
+    }
+
+    #[test]
     fn finish_output_failure_maps_to_backend_process_error() {
         let big = "z".repeat(5000) + "TAIL";
         let err = finish_output("awg show awg0", failed_output(2, &big, "e\n")).unwrap_err();
@@ -560,6 +652,62 @@ peer: def4567890abc=
         let (iface, peers) = split_sections(raw);
         assert!(iface.iter().any(|l| l.contains("interface: awg0")));
         assert!(peers.iter().any(|l| l.starts_with("peer:")));
+    }
+
+    #[test]
+    fn already_exists_tail_detected() {
+        // Verbatim tail from a lingering-interface collision (quit-leaves-up
+        // + reopen, Manjaro 2026-10-30): warning line, then the backend line.
+        assert!(is_already_exists_tail(
+            "Warning: `/root/.config/tuiblick/awg/awg0.conf' is world accessible\nawg-quick: `awg0' already exists\n"
+        ));
+        assert!(is_already_exists_tail("awg-quick: `awg0' already exists"));
+        assert!(is_already_exists_tail("WG-QUICK: `WG0' ALREADY EXISTS"));
+    }
+
+    #[test]
+    fn already_exists_tail_rejects_other_failures() {
+        for tail in [
+            "",
+            "\n",
+            "boom",
+            "No such device",
+            "RTNETLINK answers: File exists",
+            "already",
+            "exists",
+        ] {
+            assert!(
+                !is_already_exists_tail(tail),
+                "tail {tail:?} must not match"
+            );
+        }
+    }
+
+    #[test]
+    fn interface_names_from_linux_and_macos_dumps() {
+        let linux = "interface: awg0\n  listening port: 51820\n\npeer: aaa=\n  endpoint: 1.1.1.1\n";
+        assert_eq!(parse_interface_names(linux), vec!["awg0".to_owned()]);
+        let macos =
+            "interface: utun4\n  listening port: 62026\n\npeer: bbb=\n  endpoint: 2.2.2.2\n";
+        assert_eq!(parse_interface_names(macos), vec!["utun4".to_owned()]);
+        let two = "interface: awg0\n  listening port: 51820\npeer: aaa=\ninterface: awg1\n  listening port: 51821\npeer: bbb=\n";
+        assert_eq!(
+            parse_interface_names(two),
+            vec!["awg0".to_owned(), "awg1".to_owned()]
+        );
+    }
+
+    #[test]
+    fn interface_names_ignores_fields_garbage_and_case() {
+        // Indented `interface:` is a field row, not a block header.
+        assert!(parse_interface_names("  interface: awg0\n").is_empty());
+        assert!(parse_interface_names("").is_empty());
+        assert!(parse_interface_names("blarg\npeer: aaa=\nno colon here\n").is_empty());
+        assert!(parse_interface_names("interface:\ninterface:   \n").is_empty());
+        assert_eq!(
+            parse_interface_names("INTERFACE: awg7\n"),
+            vec!["awg7".to_owned()]
+        );
     }
 
     #[test]
