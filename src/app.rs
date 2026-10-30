@@ -982,6 +982,17 @@ fn batch_queue_for(app: &App) -> VecDeque<String> {
         .collect()
 }
 
+/// True when a bring-up failure means the interface is already up outside
+/// this session (quit-leaves-up + reopen): only `Process` errors carrying
+/// the backend's "already exists" tail count — auth, I/O, and any other
+/// backend failure stay fatal to the batch.
+fn is_lingering_interface(e: &AppError) -> bool {
+    match e {
+        AppError::Process { tail, .. } => crate::awg::is_already_exists_tail(tail),
+        _ => false,
+    }
+}
+
 /// One batch step: pop items until one spawns/pauses the batch, or the
 /// queue runs dry (finish). Returns what the caller must do — only the
 /// `Spawn` arm touches backends, so tests cover every other path without
@@ -1797,8 +1808,18 @@ fn complete_awg_up(
             app.pending_connect = None;
             if app.batch_active {
                 let failed = profile_name(app, &profile_id);
-                batch_clear(app);
-                show_error(app, format!("connect-all stopped at {failed}: {e}"));
+                if is_lingering_interface(&e) {
+                    // Quit leaves tunnels up by design, so after a reopen
+                    // the runtime state is clean while the interface
+                    // lingers: `awg-quick up` answers "already exists".
+                    // That is a busy backend, not a failure — skip like a
+                    // runtime-known busy backend and keep the batch going.
+                    app.batch_skipped += 1;
+                    batch_next(app, tx);
+                } else {
+                    batch_clear(app);
+                    show_error(app, format!("connect-all stopped at {failed}: {e}"));
+                }
             } else {
                 show_error(app, format!("connect failed: {e}"));
             }
@@ -2694,6 +2715,40 @@ mod tests {
         assert!(app.batch_queue.is_empty());
         assert!(matches!(app.popup, Popup::Error(_)));
         assert!(app.status_message.contains("connect-all stopped at office"));
+    }
+
+    #[test]
+    fn lingering_interface_skips_batch_without_popup() {
+        // Quit-leaves-up + reopen: runtime state is clean but awg0 lingers,
+        // so `awg-quick up` answers "already exists". Busy, not fatal —
+        // the batch skips and drains instead of stopping with an error.
+        let mut app = empty_app(true);
+        app.profiles = vec![sample_profile("a", "office", VpnType::Awg)];
+        app.phase = ConnPhase::Connecting;
+        app.batch_active = true;
+        app.batch_queue = VecDeque::from(["ghost".to_owned()]);
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let gen = app.conn_gen;
+        complete_awg_up(
+            &mut app,
+            &tx,
+            gen,
+            "a".to_owned(),
+            Err(AppError::Process {
+                cmd: "awg-quick up /root/.config/tuiblick/awg/awg0.conf".to_owned(),
+                code: Some(1),
+                tail: "Warning: `/root/.config/tuiblick/awg/awg0.conf' is world accessible\nawg-quick: `awg0' already exists".to_owned(),
+            }),
+        );
+        assert!(
+            matches!(app.popup, Popup::None),
+            "skip must not raise an error popup"
+        );
+        assert!(!app.batch_active, "drained queue finishes the batch");
+        assert_eq!(
+            app.status_message,
+            "connect-all finished: 0 connected, 1 skipped"
+        );
     }
 
     #[test]
