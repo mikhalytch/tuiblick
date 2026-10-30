@@ -65,10 +65,15 @@ pub async fn down(runner: &SudoRunner, conf_path: &Path) -> Result<String, AppEr
 /// file stem, so `awg show <stem>` fails with "Unable to access interface".
 /// (On Linux the live interface is the config file stem, e.g. `awg0`, but
 /// the bare dump covers both platforms with one code path.)
-/// Same error contract as [`up`].
+///
+/// Unlike [`up`]/[`down`], the success text is NEVER tail-capped: the
+/// dump's head carries the `interface:` lines (startup adoption, panel
+/// columns), and large configs (e.g. long Amnezia `i1` hex lines) push the
+/// dump past 2 KB — capping would decapitate it. Same error contract as
+/// [`up`] otherwise.
 pub async fn show(runner: &SudoRunner) -> Result<String, AppError> {
     let (prog, argv) = show_command();
-    run_backend(runner, &prog, argv).await
+    run_backend_full(runner, &prog, argv).await
 }
 
 /// Best-effort [`AwgSummary`] of raw `awg show` text. Never fails, never
@@ -256,6 +261,32 @@ async fn run_backend(
     }
 }
 
+/// Uncapped variant of [`run_backend`] for [`show`]: same `SudoAuth` /
+/// backend-form `Process` contract, but success text keeps the whole dump
+/// (see [`show`]).
+async fn run_backend_full(
+    runner: &SudoRunner,
+    prog: &str,
+    argv: Vec<String>,
+) -> Result<String, AppError> {
+    let cmd = backend_display(prog, &argv);
+    let args: Vec<&str> = argv.iter().map(String::as_str).collect();
+    match runner.run(prog, &args).await {
+        Ok(output) => {
+            if output.status.success() {
+                Ok(success_text_full(&output))
+            } else {
+                Err(AppError::Process {
+                    cmd,
+                    code: output.status.code(),
+                    tail: tail_2k(&combined_text(&output)),
+                })
+            }
+        }
+        Err(err) => Err(remap_process_cmd(&cmd, err)),
+    }
+}
+
 /// `(program, argv)` for `awg-quick up <full-path>`: the path stays ONE
 /// argv element (spaces/unicode safe, no shell).
 pub(crate) fn up_command(conf_path: &Path) -> (String, Vec<String>) {
@@ -326,6 +357,13 @@ pub(crate) fn remap_process_cmd(backend_cmd: &str, err: AppError) -> AppError {
 /// Combined stdout+stderr success text: trimmed, last 2 KB if huge.
 pub(crate) fn success_text(output: &Output) -> String {
     tail_2k(combined_text(output).trim())
+}
+
+/// Combined stdout+stderr success text: trimmed, never capped. For
+/// [`show`]: `interface:` lines live at the dump's head and large configs
+/// exceed 2 KB, so capping would lose them.
+pub(crate) fn success_text_full(output: &Output) -> String {
+    combined_text(output).trim().to_owned()
 }
 
 /// Concatenated stdout+stderr as lossy text.
@@ -471,6 +509,24 @@ peer: def4567890abc=
         let out = finish_output("awg-quick up /x/y.conf", ok_output(&big, "")).unwrap();
         assert!(out.len() <= 2048, "len {}", out.len());
         assert!(out.ends_with("END"), "must keep the tail");
+    }
+
+    #[test]
+    fn full_success_text_keeps_head_of_big_dump() {
+        // Regression: the adoption scan received a 2048-byte tail starting
+        // mid-`i1` hex with the `interface:` head cut off. `show` must keep
+        // the whole dump — head lines carry interface names.
+        let head = "interface: awg0\n  listening port: 40734\n";
+        let filler = "x".repeat(5000);
+        let out = success_text_full(&ok_output(&format!("{head}{filler}\npeer: aaa=\n"), ""));
+        assert!(
+            out.starts_with("interface: awg0"),
+            "head lost: {:?}",
+            &out[..40.min(out.len())]
+        );
+        assert!(out.ends_with("peer: aaa="), "tail lost");
+        assert!(out.len() > 2048, "must not be capped");
+        assert_eq!(out, out.trim(), "still trimmed");
     }
 
     #[test]
