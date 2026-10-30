@@ -202,6 +202,32 @@ pub fn is_already_exists_tail(tail: &str) -> bool {
     tail.to_ascii_lowercase().contains("already exists")
 }
 
+/// Live interface names from raw `awg show` text: values of column-0
+/// `interface:` lines (ASCII case-insensitive key), trimmed, in dump
+/// order. Used by startup adoption (Linux: the name IS the config file
+/// stem, e.g. `interface: awg0` for stored `awg/awg0.conf`). Indented
+/// lines are field rows, never names; unknown/garbage input yields an
+/// empty vec — never an error.
+pub fn parse_interface_names(raw: &str) -> Vec<String> {
+    let mut names = Vec::new();
+    for line in raw.lines() {
+        if line.starts_with(' ') || line.starts_with('\t') {
+            continue;
+        }
+        let Some(colon) = line.find(':') else {
+            continue;
+        };
+        if !line[..colon].trim().eq_ignore_ascii_case("interface") {
+            continue;
+        }
+        let value = line[colon + 1..].trim();
+        if !value.is_empty() {
+            names.push(value.to_owned());
+        }
+    }
+    names
+}
+
 /// Byte-wise ASCII case-insensitive substring search. The returned index
 /// always starts at an ASCII byte (a non-ASCII byte can never equal an
 /// ASCII needle byte), so it is a valid `str` slicing boundary.
@@ -599,6 +625,33 @@ peer: def4567890abc=
                 "tail {tail:?} must not match"
             );
         }
+    }
+
+    #[test]
+    fn interface_names_from_linux_and_macos_dumps() {
+        let linux = "interface: awg0\n  listening port: 51820\n\npeer: aaa=\n  endpoint: 1.1.1.1\n";
+        assert_eq!(parse_interface_names(linux), vec!["awg0".to_owned()]);
+        let macos =
+            "interface: utun4\n  listening port: 62026\n\npeer: bbb=\n  endpoint: 2.2.2.2\n";
+        assert_eq!(parse_interface_names(macos), vec!["utun4".to_owned()]);
+        let two = "interface: awg0\n  listening port: 51820\npeer: aaa=\ninterface: awg1\n  listening port: 51821\npeer: bbb=\n";
+        assert_eq!(
+            parse_interface_names(two),
+            vec!["awg0".to_owned(), "awg1".to_owned()]
+        );
+    }
+
+    #[test]
+    fn interface_names_ignores_fields_garbage_and_case() {
+        // Indented `interface:` is a field row, not a block header.
+        assert!(parse_interface_names("  interface: awg0\n").is_empty());
+        assert!(parse_interface_names("").is_empty());
+        assert!(parse_interface_names("blarg\npeer: aaa=\nno colon here\n").is_empty());
+        assert!(parse_interface_names("interface:\ninterface:   \n").is_empty());
+        assert_eq!(
+            parse_interface_names("INTERFACE: awg7\n"),
+            vec!["awg7".to_owned()]
+        );
     }
 
     #[test]
