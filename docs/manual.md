@@ -138,7 +138,10 @@ Press `?` in the app for the full table. Essentials:
   no daemon, no launch-at-login in MVP. After a reopen the runtime
   state is clean while the interface lingers: a single `Enter` on that
   profile reports `` `awg0' already exists ``, and connect-all (`C`)
-  skips the lingering profile as busy instead of stopping.
+  skips the lingering profile as busy instead of stopping. On Linux,
+  a reopen instead adopts a lingering AWG tunnel outright: the profile
+  shows `connected (adopted)` (started outside this session), and
+  polling, `d`, and exit-IP work as usual.
 - **Sudo password lives in memory only.** First connect that needs
   privilege opens one masked prompt per session (`sudo: root |
   sudo cached | sudo needed` in the header). The password is zeroized
