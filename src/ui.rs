@@ -85,7 +85,7 @@ fn render_main(frame: &mut Frame, app: &App, area: Rect) {
     render_detail(frame, app, cols[1]);
 }
 
-/// Left pane: `display_name` + backend badge + active marker + `(missing)`.
+/// Left pane: `display_name` + backend badge + active marker + `(missing)` + `(adopted)`.
 fn render_profile_list(frame: &mut Frame, app: &App, area: Rect) {
     if area.width == 0 || area.height == 0 {
         return;
@@ -115,6 +115,18 @@ fn render_profile_list(frame: &mut Frame, app: &App, area: Rect) {
             } else {
                 ""
             };
+            // Adopted tunnels were up before this session (startup
+            // adoption of a lingering interface): badged so the list is
+            // honest about what this session started.
+            let adopted = if app
+                .active
+                .iter()
+                .any(|a| a.profile_id == profile.id && a.adopted)
+            {
+                " (adopted)"
+            } else {
+                ""
+            };
             let line = Line::from(vec![
                 Span::raw(marker),
                 Span::styled(
@@ -126,7 +138,7 @@ fn render_profile_list(frame: &mut Frame, app: &App, area: Rect) {
                     },
                 ),
                 Span::styled(
-                    format!(" {badge}{missing}"),
+                    format!(" {badge}{missing}{adopted}"),
                     Style::default().fg(Color::DarkGray),
                 ),
             ]);
@@ -725,6 +737,20 @@ mod tests {
     }
 
     #[test]
+    fn adopted_profile_is_badged_in_list() {
+        let mut app = fixture_app();
+        app.active = vec![ActiveConn {
+            profile_id: "a".to_owned(),
+            kind: VpnType::Awg,
+            started_at: "unknown (adopted)".to_owned(),
+            last_exit_ip: None,
+            adopted: true,
+        }];
+        let screen = render_text(&app, 80, 24);
+        assert!(screen.contains("(adopted)"), "adopted badge missing");
+    }
+
+    #[test]
     fn popups_render_without_panic_at_80x24() {
         let mut app = fixture_app();
         app.active = vec![ActiveConn {
@@ -732,6 +758,7 @@ mod tests {
             kind: VpnType::Awg,
             started_at: "2026-10-06T12:00:00Z".to_owned(),
             last_exit_ip: Some("2.2.2.2".to_owned()),
+            adopted: false,
         }];
         let popups = vec![
             Popup::Help,
@@ -783,6 +810,7 @@ mod tests {
             kind: VpnType::OpenVpn,
             started_at: "2026-10-06T12:00:00Z".to_owned(),
             last_exit_ip: Some("9.9.9.9".to_owned()),
+            adopted: false,
         }];
         app.ovpn_daemon_warn = true;
         for i in 0..30 {
@@ -817,12 +845,14 @@ mod tests {
                 kind: VpnType::Awg,
                 started_at: "2026-10-06T12:00:00Z".to_owned(),
                 last_exit_ip: Some("1.1.1.1".to_owned()),
+                adopted: false,
             },
             ActiveConn {
                 profile_id: "b".to_owned(),
                 kind: VpnType::OpenVpn,
                 started_at: "2026-10-06T12:00:00Z".to_owned(),
                 last_exit_ip: Some("2.2.2.2".to_owned()),
+                adopted: false,
             },
         ];
         app.awg_status = "interface: awg0\nlatest handshake: just now".to_owned();
@@ -904,6 +934,7 @@ mod tests {
             kind: VpnType::OpenVpn,
             started_at: "2026-10-06T12:00:00Z".to_owned(),
             last_exit_ip: Some("9.9.9.9".to_owned()),
+            adopted: false,
         }];
         app.log_follow = false;
         app.detail_scroll = 7;
